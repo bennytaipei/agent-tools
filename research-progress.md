@@ -1,7 +1,7 @@
 # Checkpoint
 
 Objective:
-Lock the tool contract format so many namespaces can be added later, and move the four browser tools onto that contract. Manifests only. No tool implementations. No secrets.
+Lock the tool contract format so many namespaces can be added later, move the four browser tools onto that contract, and prove it with one draft Teams write tool. Manifests only. No tool implementations. No secrets.
 
 Frozen acceptance (one row per criterion):
 1. schema/manifest.schema.json (JSON Schema draft 2020-12) defines one tool contract. Required fields: name, version, when_to_use, inputs, outputs, side_effects, errors, auth_needed. additionalProperties false.
@@ -18,9 +18,10 @@ Frozen acceptance (one row per criterion):
 12. .github/workflows/check.yml runs check.py and the tests on push and pull_request.
 13. README.md documents the contract fields, versioning, and how to add a namespace: one index entry, one folder, then run the check.
 14. `uv run scripts/check.py` passes and the test command passes on the final tree.
+15. Add a second namespace `teams` (Microsoft Teams) to catalog/index.yaml with one draft manifest, catalog/teams/send_message.yaml, name teams.send_message, version 0.1.0 to mark it draft. Inputs: team_id or chat_id plus message text. Output: message_id. side_effects: posts a message visible to other people. errors such as not_found, forbidden, throttled. auth_needed: microsoft_graph_delegated with the Graph scope named, never a value. Its purpose is to prove the schema fits a write tool with external auth. Benny will define the real Teams tools later, so add only this one. check.py and the tests must still pass.
 
 Current state:
-- All fourteen acceptance rows pass on this tree. Manifests only. No tool implementations. No secrets.
+- All fifteen acceptance rows pass on this tree. Manifests only. No tool implementations. No secrets.
 - schema/manifest.schema.json and schema/index.schema.json are JSON Schema draft 2020-12. The manifest contract requires name, version, when_to_use, inputs, outputs, side_effects, errors, and auth_needed, and sets additionalProperties false.
 - Names are <namespace>.<tool> in lowercase snake_case. version is MAJOR.MINOR.PATCH. inputs and outputs are JSON Schema objects. side_effects is a non-empty string. Read-only browser.read and browser.screenshot say "None." explicitly.
 - errors is a list of {code, when}. codes are lowercase snake_case. The schema requires the list. scripts/check.py rejects a repeated code. An empty list is valid.
@@ -28,6 +29,7 @@ Current state:
 - The four browser manifests are browser.navigate, browser.read, browser.screenshot, and browser.handoff at version 1.0.0. navigate reports invalid_url and navigation_failed. read and screenshot report no_page. handoff reports share_failed and notify_failed. handoff outputs stay done, timeout, and cancelled.
 - scripts/check.py checks manifests, the index, folder and filename alignment, unique tool names, and a one-to-one index/folder match. tests/ covers a valid catalog and the breakage cases, including filename mismatch, a folder with no index entry, and a duplicate error code.
 - .github/workflows/check.yml runs the check and the tests on push and pull_request. README.md documents the fields, versioning, and how to add a namespace.
+- catalog/teams/send_message.yaml is the only Teams manifest. teams.send_message is version 0.1.0. Inputs require text and exactly one of team_id or chat_id. Output is message_id. side_effects posts a message visible to other people. Errors are not_found, forbidden, and throttled. auth_needed is microsoft_graph_delegated. when_to_use names the delegated Graph scopes ChannelMessage.Send and ChatMessage.Send.
 
 Decisions:
 - Qualified names are exactly two lowercase snake_case segments, because the checker ties the namespace to the folder and the tool to the filename.
@@ -35,6 +37,8 @@ Decisions:
 - check.py takes an optional catalog root so tests can point at fixture catalogs. The default root is the repo.
 - Two files cannot both be path-aligned and share one qualified name. The duplicate-name fixture reuses demo.ping in pong.yaml, and the test asserts the duplicate tool name message.
 - AGENTS.md's manifest field list includes version and errors so it matches the locked contract.
+- The Teams draft does not change the schema. auth_needed stays a snake_case credential name, microsoft_graph_delegated. Graph scope strings contain dots and capitals, so ChannelMessage.Send and ChatMessage.Send are named in when_to_use and are not stored as auth values.
+- Inputs take exactly one of team_id or chat_id, plus text. Least-privileged delegated scopes are ChannelMessage.Send for a team and ChatMessage.Send for a chat.
 
 Done earlier:
 - Private repo scaffold: README, catalog/index.yaml, and four browser manifests (navigate, read, screenshot, handoff). Manifests only, no implementations, no secrets. One commit on main.
@@ -60,13 +64,15 @@ Files changed:
 - tests/fixtures/folder_without_index/
 - tests/fixtures/duplicate_error_code/
 - .github/workflows/check.yml
+- catalog/index.yaml
+- catalog/teams/send_message.yaml
 
 Commands that worked / failed:
 - worked: `uv run scripts/check.py` exited 0 on the final tree.
-- worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` — 10 passed on the final tree.
+- worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` — 11 passed on the final tree.
 
 Next action:
-- None. All fourteen acceptance rows pass. Do not push.
+- None. All fifteen acceptance rows pass. Do not push.
 
 Unresolved (non-blocking):
 - None.

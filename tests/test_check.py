@@ -127,3 +127,27 @@ def test_browser_manifests():
     ]
     assert manifests["read.yaml"]["side_effects"].startswith("None.")
     assert manifests["screenshot.yaml"]["side_effects"].startswith("None.")
+
+
+def test_teams_send_message_draft():
+    folder = REPO / "catalog" / "teams"
+    files = sorted(path.name for path in folder.glob("*.yaml"))
+    assert files == ["send_message.yaml"]
+    manifest = yaml.safe_load((folder / "send_message.yaml").read_text(encoding="utf-8"))
+    assert manifest["name"] == "teams.send_message"
+    assert manifest["version"] == "0.1.0"
+    assert set(manifest["inputs"]["properties"]) == {"team_id", "chat_id", "text"}
+    assert manifest["inputs"]["required"] == ["text"]
+    assert manifest["outputs"]["required"] == ["message_id"]
+    assert manifest["outputs"]["properties"]["message_id"]["type"] == "string"
+    assert manifest["side_effects"] == "Posts a message visible to other people."
+    assert [item["code"] for item in manifest["errors"]] == [
+        "not_found",
+        "forbidden",
+        "throttled",
+    ]
+    assert manifest["auth_needed"] == ["microsoft_graph_delegated"]
+    assert "ChannelMessage.Send" in manifest["when_to_use"]
+    assert "ChatMessage.Send" in manifest["when_to_use"]
+    index = yaml.safe_load((REPO / "catalog" / "index.yaml").read_text(encoding="utf-8"))
+    assert [entry["name"] for entry in index["namespaces"]] == ["browser", "teams"]

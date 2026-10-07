@@ -1,0 +1,50 @@
+name: teams.send_message
+version: 0.1.0
+when_to_use: Draft. Post a message into a Microsoft Teams team or chat. Delegated Microsoft Graph scope ChannelMessage.Send for team_id, and ChatMessage.Send for chat_id. Benny will replace this draft with the real Teams tools.
+inputs:
+  type: object
+  additionalProperties: false
+  required:
+    - text
+  properties:
+    team_id:
+      type: string
+      minLength: 1
+      description: Microsoft Teams team id. Set this or chat_id.
+    chat_id:
+      type: string
+      minLength: 1
+      description: Microsoft Teams chat id. Set this or team_id.
+    text:
+      type: string
+      minLength: 1
+      description: Message text to post.
+  oneOf:
+    - required:
+        - team_id
+      properties:
+        chat_id: false
+    - required:
+        - chat_id
+      properties:
+        team_id: false
+outputs:
+  type: object
+  additionalProperties: false
+  required:
+    - message_id
+  properties:
+    message_id:
+      type: string
+      minLength: 1
+      description: Id of the posted message.
+side_effects: Posts a message visible to other people.
+errors:
+  - code: not_found
+    when: The team_id or chat_id does not match a team or chat.
+  - code: forbidden
+    when: The signed-in user is not allowed to post in that team or chat.
+  - code: throttled
+    when: Microsoft Graph refused the post because the caller is rate limited.
+auth_needed:
+  - microsoft_graph_delegated

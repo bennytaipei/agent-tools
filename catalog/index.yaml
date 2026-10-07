@@ -4,3 +4,6 @@ namespaces:
   - name: browser
     description: Remote headless browser for an authenticated site, with HTTP noVNC handoff to Benny on login.
     path: catalog/browser
+  - name: teams
+    description: Draft Microsoft Teams writes through delegated Microsoft Graph.
+    path: catalog/teams

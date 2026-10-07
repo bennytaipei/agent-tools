@@ -12,7 +12,7 @@ Level two is one manifest per tool: `catalog/<namespace>/<tool>.yaml`.
 
 An agent lists namespaces from `catalog/index.yaml` first. It loads a namespace's tool schemas only when it needs them. It does not load every manifest up front.
 
-The only namespace today is `browser` (`catalog/browser/`): `browser.navigate`, `browser.read`, `browser.screenshot`, `browser.handoff`.
+Namespaces today are `browser` (`catalog/browser/`): `browser.navigate`, `browser.read`, `browser.screenshot`, `browser.handoff`; and draft `teams` (`catalog/teams/`): `teams.send_message` at version `0.1.0`. Benny will replace that draft with the real Teams tools.
 
 ## Contract
 
