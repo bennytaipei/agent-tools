@@ -1,0 +1,23 @@
+name: read
+when_to_use: Return the text content of the page the remote browser is already on.
+inputs:
+  type: object
+  additionalProperties: false
+  properties: {}
+outputs:
+  type: object
+  additionalProperties: false
+  required:
+    - url
+    - text
+  properties:
+    url:
+      type: string
+      format: uri
+      description: URL of the current page.
+    text:
+      type: string
+      description: Text content of the current page.
+side_effects: None. Does not navigate, click, or change the page.
+auth_needed:
+  - browser_session

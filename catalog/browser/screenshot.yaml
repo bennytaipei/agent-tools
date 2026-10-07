@@ -1,0 +1,20 @@
+name: screenshot
+when_to_use: Capture the current page as an image.
+inputs:
+  type: object
+  additionalProperties: false
+  properties: {}
+outputs:
+  type: object
+  additionalProperties: false
+  required:
+    - image
+  properties:
+    image:
+      type: string
+      contentMediaType: image/png
+      contentEncoding: base64
+      description: PNG screenshot of the current page.
+side_effects: None. Does not navigate, click, or change the page.
+auth_needed:
+  - browser_session

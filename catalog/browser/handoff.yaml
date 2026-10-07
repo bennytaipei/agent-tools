@@ -1,0 +1,34 @@
+name: handoff
+when_to_use: The live page needs Benny, usually because it is a login wall. One call starts the share, notifies him, waits, and ends the share.
+inputs:
+  type: object
+  additionalProperties: false
+  required:
+    - reason
+    - timeout
+  properties:
+    reason:
+      type: string
+      minLength: 1
+      description: Why Benny is being handed the live browser.
+    timeout:
+      type: integer
+      minimum: 1
+      description: Seconds to block while Benny has the browser.
+outputs:
+  type: object
+  additionalProperties: false
+  required:
+    - status
+  properties:
+    status:
+      type: string
+      enum:
+        - done
+        - timeout
+        - cancelled
+      description: done when Benny finishes, timeout when the wait elapses, cancelled when the handoff is cancelled.
+side_effects: Starts the HTTP noVNC share, notifies Benny, and blocks until he finishes, the timeout elapses, or the handoff is cancelled. Returns done, timeout, or cancelled. Ends the share itself in every case. No separate start, stop, notify, or status action.
+auth_needed:
+  - browser_session
+  - benny_notify_channel

@@ -1,0 +1,6 @@
+# Level one. List these namespaces first. Load tool schemas from a
+# namespace folder only when that namespace is needed.
+namespaces:
+  - name: browser
+    description: Remote headless browser for an authenticated site, with HTTP noVNC handoff to Benny on login.
+    path: catalog/browser
