@@ -8,10 +8,45 @@ A tool is one action the harness offers. It has typed inputs, typed outputs, and
 
 `catalog/index.yaml` is level one. It lists namespaces. Each namespace has a one-line description and the path to its folder.
 
-Level two is the tool manifests in that folder: `catalog/<namespace>/<tool>.yaml`. Each manifest has `name`, `when_to_use`, `inputs`, `outputs`, `side_effects`, and `auth_needed`. Inputs and outputs use JSON Schema types. A property listed in `required` is required; any other property is optional. `auth_needed` names the credential or session a tool relies on and never holds a value.
-
-The only namespace today is `browser` (`catalog/browser/`): `navigate`, `read`, `screenshot`, `handoff`.
-
-## Loading
+Level two is one manifest per tool: `catalog/<namespace>/<tool>.yaml`.
 
 An agent lists namespaces from `catalog/index.yaml` first. It loads a namespace's tool schemas only when it needs them. It does not load every manifest up front.
+
+The only namespace today is `browser` (`catalog/browser/`): `browser.navigate`, `browser.read`, `browser.screenshot`, `browser.handoff`.
+
+## Contract
+
+`schema/manifest.schema.json` (JSON Schema draft 2020-12) is the contract for every manifest. `additionalProperties` is false. These fields are required:
+
+- `name` is the fully qualified `<namespace>.<tool>`. Each segment is lowercase snake_case, for example `browser.handoff`. The namespace matches the folder name. The tool matches the filename.
+- `version` is semver `MAJOR.MINOR.PATCH`.
+- `when_to_use` says when an agent should call the tool.
+- `inputs` is a JSON Schema whose `type` is `object`.
+- `outputs` is a JSON Schema whose `type` is `object`.
+- `side_effects` is a non-empty string that says what the call changes. Read-only tools say `None.` explicitly.
+- `errors` is a list of `{code, when}`. `code` is lowercase snake_case and unique within the manifest. `when` says when that code is returned. An empty list is allowed and is written `[]`. Normal results stay in `outputs`. For `browser.handoff`, `done`, `timeout`, and `cancelled` are output statuses.
+- `auth_needed` is a list of credential or session names. The list holds names only, never a secret or token value. An empty list is allowed and is written `[]`.
+
+`schema/index.schema.json` validates `catalog/index.yaml`. `namespaces` is a list of `{name, description, path}`. `description` is one line. `path` is `catalog/<name>`. Index entries and namespace folders match one to one.
+
+## Versioning
+
+Bump `MAJOR` when inputs or outputs change in a breaking way. A breaking change removes or renames a field, changes a type, makes a new input required, or removes an output callers already rely on.
+
+Bump `MINOR` when the contract grows and existing callers keep working. A new optional input, a new output field, or a new error code is `MINOR`.
+
+Bump `PATCH` when wording changes and inputs, outputs, and error codes stay the same. Updates to `when_to_use`, descriptions, and `side_effects` text are `PATCH`.
+
+## Add a namespace
+
+1. Add one entry under `namespaces` in `catalog/index.yaml` with `name`, a one-line `description`, and `path` set to `catalog/<name>`.
+2. Create the folder `catalog/<name>/` and add one `<tool>.yaml` manifest per tool. Set each manifest `name` to `<name>.<tool>`.
+3. Run `uv run scripts/check.py`.
+
+The check exits non-zero and prints a message when a manifest breaks the schema, a name disagrees with its folder or filename, a tool name is duplicated, an error code repeats inside one manifest, or the index and the namespace folders disagree. `scripts/check.py` declares `pyyaml` and `jsonschema` inline (PEP 723). `uv run` installs them for that run.
+
+Tests for the checker live in `tests/` and run with:
+
+```
+uv run --with pytest --with pyyaml --with jsonschema pytest -q
+```

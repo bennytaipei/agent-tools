@@ -1,4 +1,5 @@
-name: navigate
+name: browser.navigate
+version: 1.0.0
 when_to_use: Go to a URL in the remote browser.
 inputs:
   type: object
@@ -21,5 +22,10 @@ outputs:
       format: uri
       description: URL of the page after navigation, including redirects.
 side_effects: Loads the URL in the shared remote browser and replaces the current page.
+errors:
+  - code: invalid_url
+    when: The url input is not an absolute URL the remote browser can open.
+  - code: navigation_failed
+    when: The remote browser could not load the URL.
 auth_needed:
   - browser_session

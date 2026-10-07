@@ -1,0 +1,4 @@
+namespaces:
+  - name: demo
+    description: Demo tools for the checker.
+    path: catalog/demo

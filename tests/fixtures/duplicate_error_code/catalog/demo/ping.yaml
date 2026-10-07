@@ -1,0 +1,22 @@
+name: demo.ping
+version: 1.0.0
+when_to_use: Check that the demo namespace answers.
+inputs:
+  type: object
+  additionalProperties: false
+  properties: {}
+outputs:
+  type: object
+  additionalProperties: false
+  required:
+    - ok
+  properties:
+    ok:
+      type: boolean
+side_effects: "None."
+errors:
+  - code: no_page
+    when: The remote browser has no current page.
+  - code: no_page
+    when: The page was closed before the read.
+auth_needed: []

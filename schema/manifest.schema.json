@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-tools.local/schema/manifest.schema.json",
+  "title": "Agent tool manifest",
+  "description": "One tool contract. A manifest names a single action, its typed inputs and outputs, its side effect, the errors it reports, and the credentials it needs by name.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "version",
+    "when_to_use",
+    "inputs",
+    "outputs",
+    "side_effects",
+    "errors",
+    "auth_needed"
+  ],
+  "$defs": {
+    "snake_case": {
+      "description": "Lowercase snake_case name. A credential or error code, never a secret value.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*$"
+    },
+    "object_schema": {
+      "description": "A JSON Schema document whose instance type is object.",
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "const": "object"
+        }
+      }
+    }
+  },
+  "properties": {
+    "name": {
+      "description": "Fully qualified tool name <namespace>.<tool>. Each segment is lowercase snake_case. Example: browser.handoff.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*\\.[a-z][a-z0-9]*(_[a-z0-9]+)*$"
+    },
+    "version": {
+      "description": "Semver MAJOR.MINOR.PATCH. A breaking input or output change requires a new MAJOR.",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "when_to_use": {
+      "description": "When an agent should call this tool.",
+      "type": "string",
+      "minLength": 1
+    },
+    "inputs": {
+      "$ref": "#/$defs/object_schema"
+    },
+    "outputs": {
+      "$ref": "#/$defs/object_schema"
+    },
+    "side_effects": {
+      "description": "What the call changes. A non-empty string. Read-only tools say \"None.\" explicitly.",
+      "type": "string",
+      "minLength": 1
+    },
+    "errors": {
+      "description": "Errors this tool reports. An empty list is allowed and must be written explicitly. Each code is lowercase snake_case and unique within the manifest.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "when"],
+        "properties": {
+          "code": {
+            "$ref": "#/$defs/snake_case"
+          },
+          "when": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "auth_needed": {
+      "description": "Credential or session names this tool relies on. Names only, never values. An empty list is allowed and must be written explicitly.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/snake_case"
+      }
+    }
+  }
+}

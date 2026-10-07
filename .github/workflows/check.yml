@@ -1,0 +1,24 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+
+      - name: Validate the catalog
+        run: uv run scripts/check.py
+
+      - name: Test the checker
+        run: uv run --with pytest --with pyyaml --with jsonschema pytest -q

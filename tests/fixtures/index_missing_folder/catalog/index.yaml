@@ -1,0 +1,7 @@
+namespaces:
+  - name: demo
+    description: Demo tools for the checker.
+    path: catalog/demo
+  - name: ghost
+    description: Listed in the index with no folder on disk.
+    path: catalog/ghost

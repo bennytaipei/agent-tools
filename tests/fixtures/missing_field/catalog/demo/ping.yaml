@@ -1,0 +1,17 @@
+name: demo.ping
+when_to_use: Check that the demo namespace answers.
+inputs:
+  type: object
+  additionalProperties: false
+  properties: {}
+outputs:
+  type: object
+  additionalProperties: false
+  required:
+    - ok
+  properties:
+    ok:
+      type: boolean
+side_effects: "None."
+errors: []
+auth_needed: []

@@ -1,4 +1,5 @@
-name: screenshot
+name: browser.screenshot
+version: 1.0.0
 when_to_use: Capture the current page as an image.
 inputs:
   type: object
@@ -16,5 +17,8 @@ outputs:
       contentEncoding: base64
       description: PNG screenshot of the current page.
 side_effects: None. Does not navigate, click, or change the page.
+errors:
+  - code: no_page
+    when: The remote browser has no current page to capture.
 auth_needed:
   - browser_session
