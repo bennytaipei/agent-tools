@@ -20,5 +20,10 @@ jobs:
       - name: Validate the catalog
         run: uv run scripts/check.py
 
+      # The browser runtime tests need system Chrome at /usr/bin/google-chrome,
+      # plus Xvfb, x11vnc, websockify, and /usr/share/novnc. ubuntu-latest does
+      # not provide that stack. This job stays on the catalog check and the
+      # checker tests so it remains green. Run the runtime tests locally with:
+      #   uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q
       - name: Test the checker
         run: uv run --with pytest --with pyyaml --with jsonschema pytest -q
