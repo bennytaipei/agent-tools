@@ -1,78 +1,60 @@
 # Checkpoint
 
 Objective:
-Lock the tool contract format so many namespaces can be added later, move the four browser tools onto that contract, and prove it with one draft Teams write tool. Manifests only. No tool implementations. No secrets.
+Build a reference runtime for the four browser tools so a remote headless agent can call them. The manifests in catalog/browser/ are the contract and the single source of truth. A remote agent drives Chrome on an authenticated site. On a login wall it calls browser.handoff, Benny takes the same live browser over HTTP noVNC, logs in, clicks Done, and the agent continues with that session. Do not change manifests unless the implementation proves a contract gap. Work on branch browser-runtime. Do not push.
 
 Frozen acceptance (one row per criterion):
-1. schema/manifest.schema.json (JSON Schema draft 2020-12) defines one tool contract. Required fields: name, version, when_to_use, inputs, outputs, side_effects, errors, auth_needed. additionalProperties false.
-2. name is fully qualified as <namespace>.<tool>, lowercase snake_case segments, for example browser.handoff.
-3. version is semver (MAJOR.MINOR.PATCH). The README says when to bump each part. Breaking input or output change means MAJOR.
-4. inputs and outputs are JSON Schema objects (type object).
-5. side_effects is a non-empty string. Read-only tools say "None." explicitly.
-6. errors is a list of {code, when}. code is lowercase snake_case and unique within a manifest. An empty list is allowed but must be explicit.
-7. auth_needed is a list of credential or session names. It never holds a value.
-8. schema/index.schema.json validates catalog/index.yaml: namespaces list of {name, description, path}. description is one line.
-9. scripts/check.py validates the whole catalog and exits non-zero with a clear message on any failure. It checks every manifest against the schema, the index against its schema, that each manifest's namespace matches its folder and its tool part matches its filename, that names are unique across the catalog, and that index entries and namespace folders match one to one. It runs with `uv run scripts/check.py` using PEP 723 inline dependencies (pyyaml, jsonschema). Nothing gets installed globally.
-10. tests/ prove check.py catches real breakage. Use small fixture catalogs: one valid, and one each for a missing field, a duplicate name, a namespace or folder mismatch, and an index entry with no folder. Assert on exit code and on the message text. Run with `uv run --with pytest --with pyyaml --with jsonschema pytest -q`.
-11. The four browser manifests (navigate, read, screenshot, handoff) are migrated to the schema. Qualified names, version 1.0.0, and realistic errors, for example navigation_failed or invalid_url for navigate, no_page for read and screenshot, and share_failed or notify_failed for handoff. handoff's done, timeout, and cancelled remain outputs, not errors. Still exactly four browser verbs.
-12. .github/workflows/check.yml runs check.py and the tests on push and pull_request.
-13. README.md documents the contract fields, versioning, and how to add a namespace: one index entry, one folder, then run the check.
-14. `uv run scripts/check.py` passes and the test command passes on the final tree.
-15. Add a second namespace `teams` (Microsoft Teams) to catalog/index.yaml with one draft manifest, catalog/teams/send_message.yaml, name teams.send_message, version 0.1.0 to mark it draft. Inputs: team_id or chat_id plus message text. Output: message_id. side_effects: posts a message visible to other people. errors such as not_found, forbidden, throttled. auth_needed: microsoft_graph_delegated with the Graph scope named, never a value. Its purpose is to prove the schema fits a write tool with external auth. Benny will define the real Teams tools later, so add only this one. check.py and the tests must still pass.
+1. The runtime lives under runtimes/browser/ as a Python package. Run it with `uv`, using pyproject dependencies or PEP 723 inline dependencies. Nothing gets installed globally.
+2. It is exposed as an MCP server over stdio with exactly four tools: browser.navigate, browser.read, browser.screenshot, and browser.handoff. Each tool's name, description, and input schema are loaded from the catalog manifest at startup, not copied by hand.
+3. The runtime validates every tool's inputs against the manifest's inputs schema and every result against its outputs schema. Failures return the manifest's declared error codes only. It never invents a code.
+4. Chrome comes from Playwright using the installed system Chrome (/usr/bin/google-chrome, channel chrome), with a persistent profile directory from an env var. It runs headed on its own Xvfb display, so handoff shows the exact same browser. It must not reuse or disturb displays or ports already in use on this machine. Pick free ones at runtime.
+5. browser.handoff(reason, timeout) starts x11vnc on the runtime's display and websockify with the bundled noVNC (/usr/share/novnc) on a free port, behind a random one-time token in the URL. It serves a small handoff page with the noVNC view plus Done and Cancel buttons. It notifies Benny by POSTing JSON {reason, url, expires_at} to the webhook in an env var (for example AGENT_TOOLS_NOTIFY_WEBHOOK). It blocks until Done, Cancel, or the timeout, then returns done, cancelled, or timeout. It stops x11vnc and websockify in every case, including errors. No env var or a failed POST means notify_failed, and the share is torn down.
+6. No secrets in the repo. Credentials and webhook URLs come only from env vars and appear in docs by name only.
+7. Behavior tests drive the real runtime against a local test HTTP server and a local webhook receiver, with no internet. navigate returns the final URL after a redirect. read returns text containing a literal string from the test page. screenshot returns base64 that decodes to PNG bytes. invalid_url and navigation_failed come back for bad input. Handoff returns done when the test POSTs Done, cancelled on Cancel, and timeout on a short timeout. In each handoff case, the noVNC port is closed afterwards and the webhook received {reason, url, expires_at}. notify_failed comes back when the webhook env var is unset. Every result validates against its manifest. Assert literal values.
+8. runtimes/browser/README.md explains how to run the server, the env vars by name, and how a harness registers it as an MCP server.
+9. scripts/check.py and the existing tests still pass. The new tests pass with one documented `uv run` command. CI runs the new tests too if they can run on ubuntu-latest. If they can't, say why in the workflow and keep the catalog check job green.
+10. This machine is heavily loaded and shared with other agents' desktops. Never kill processes you did not start. Clean up every Xvfb, x11vnc, websockify, and Chrome process your tests start.
 
 Current state:
-- All fifteen acceptance rows pass on this tree. Manifests only. No tool implementations. No secrets.
-- schema/manifest.schema.json and schema/index.schema.json are JSON Schema draft 2020-12. The manifest contract requires name, version, when_to_use, inputs, outputs, side_effects, errors, and auth_needed, and sets additionalProperties false.
-- Names are <namespace>.<tool> in lowercase snake_case. version is MAJOR.MINOR.PATCH. inputs and outputs are JSON Schema objects. side_effects is a non-empty string. Read-only browser.read and browser.screenshot say "None." explicitly.
-- errors is a list of {code, when}. codes are lowercase snake_case. The schema requires the list. scripts/check.py rejects a repeated code. An empty list is valid.
-- auth_needed is a list of credential or session names and holds no values.
-- The four browser manifests are browser.navigate, browser.read, browser.screenshot, and browser.handoff at version 1.0.0. navigate reports invalid_url and navigation_failed. read and screenshot report no_page. handoff reports share_failed and notify_failed. handoff outputs stay done, timeout, and cancelled.
-- scripts/check.py checks manifests, the index, folder and filename alignment, unique tool names, and a one-to-one index/folder match. tests/ covers a valid catalog and the breakage cases, including filename mismatch, a folder with no index entry, and a duplicate error code.
-- .github/workflows/check.yml runs the check and the tests on push and pull_request. README.md documents the fields, versioning, and how to add a namespace.
-- catalog/teams/send_message.yaml is the only Teams manifest. teams.send_message is version 0.1.0. Inputs require text and exactly one of team_id or chat_id. Output is message_id. side_effects posts a message visible to other people. Errors are not_found, forbidden, and throttled. auth_needed is microsoft_graph_delegated. when_to_use names the delegated Graph scopes ChannelMessage.Send and ChatMessage.Send.
+- All ten acceptance rows pass. Catalog manifests stay at 1.0.0. No contract gap turned up, so no version bump.
+- Branch browser-runtime is pushed with a PR open for review.
+- After the behavior tests, displays in /tmp/.X11-unix are still X1, X10, X13, X16, and X3. No Xvfb, x11vnc, websockify, or Chrome process from this runtime remains.
 
 Decisions:
-- Qualified names are exactly two lowercase snake_case segments, because the checker ties the namespace to the folder and the tool to the filename.
-- Draft 2020-12 cannot say "error codes are unique" for objects in an array. The schema states the rule. scripts/check.py rejects a repeated code.
-- check.py takes an optional catalog root so tests can point at fixture catalogs. The default root is the repo.
-- Two files cannot both be path-aligned and share one qualified name. The duplicate-name fixture reuses demo.ping in pong.yaml, and the test asserts the duplicate tool name message.
-- AGENTS.md's manifest field list includes version and errors so it matches the locked contract.
-- The Teams draft does not change the schema. auth_needed stays a snake_case credential name, microsoft_graph_delegated. Graph scope strings contain dots and capitals, so ChannelMessage.Send and ChatMessage.Send are named in when_to_use and are not stored as auth values.
-- Inputs take exactly one of team_id or chat_id, plus text. Least-privileged delegated scopes are ChannelMessage.Send for a team and ChatMessage.Send for a chat.
+- Branch is browser-runtime, cut from main tip ebf7959. Do not push.
+- Manifests stay untouched. The implementation maps onto the existing error codes.
+- MCP tool description is the manifest when_to_use string. input_schema and output_schema are the manifest inputs and outputs objects, loaded at startup.
+- A schema rejection uses a code that manifest already declares: invalid_url for navigate, share_failed for handoff, no_page for read and screenshot. Unexpected operational failures use navigation_failed, share_failed, no_page, or notify_failed. Error results are MCP is_error with text {"code":"<declared>"}. Success results carry structured content that matches the outputs schema.
+- format: uri is enforced with a checker this runtime adds, because the stock Draft 2020-12 checker does not implement uri. Navigate accepts only absolute http and https URLs.
+- Chrome runs headed (channel chrome, executable /usr/bin/google-chrome) on a private Xvfb display chosen at runtime from 200–499. The server process DISPLAY is not changed, and the MCP client does not pass the host DISPLAY. Each run has a private X authority file. Cleanup signals only processes whose command line contains this run's profile or state path, or a pid this run recorded with a matching start time.
+- Each navigate opens a new tab and closes the previous one. A refused connection leaves Chrome navigating to an error page, and that navigation was interrupting the next goto.
+- Handoff posts {reason, url, expires_at} to AGENT_TOOLS_NOTIFY_WEBHOOK. The url field is the handoff page. websockify listens on its own free port, serves /usr/share/novnc, and accepts the VNC websocket only with the one-time token. x11vnc and websockify stop before the tool returns, including notify_failed and share_failed. An unset webhook returns notify_failed before Chrome starts. A failed POST starts the share, then tears x11vnc and websockify down.
+- Browser behavior tests are not part of the catalog pytest run (root pytest.ini testpaths = tests). ubuntu-latest has no system Chrome, Xvfb, x11vnc, websockify, or /usr/share/novnc, so CI only runs the catalog check. The workflow comment records that and the local command.
+- Env vars appear in docs by name only: AGENT_TOOLS_BROWSER_PROFILE, AGENT_TOOLS_NOTIFY_WEBHOOK, and optional AGENT_TOOLS_ROOT. The harness example has no env values.
 
 Done earlier:
-- Private repo scaffold: README, catalog/index.yaml, and four browser manifests (navigate, read, screenshot, handoff). Manifests only, no implementations, no secrets. One commit on main.
+- Manifest contract locked (schema, checker, tests, CI) and four browser tools migrated to it. Draft teams.send_message at 0.1.0 proves a write tool with external auth. Manifests only. Those commits are on origin/main at ebf7959, and CI passed.
 
 Files changed:
-- AGENTS.md
-- README.md
-- research-progress.md
-- schema/manifest.schema.json
-- schema/index.schema.json
-- scripts/check.py
-- catalog/browser/navigate.yaml
-- catalog/browser/read.yaml
-- catalog/browser/screenshot.yaml
-- catalog/browser/handoff.yaml
-- tests/test_check.py
-- tests/fixtures/valid/
-- tests/fixtures/missing_field/
-- tests/fixtures/duplicate_name/
-- tests/fixtures/namespace_mismatch/
-- tests/fixtures/index_missing_folder/
-- tests/fixtures/filename_mismatch/
-- tests/fixtures/folder_without_index/
-- tests/fixtures/duplicate_error_code/
+- .gitignore
+- pytest.ini
 - .github/workflows/check.yml
-- catalog/index.yaml
-- catalog/teams/send_message.yaml
+- research-progress.md
+- runtimes/browser/README.md
+- runtimes/browser/pyproject.toml
+- runtimes/browser/uv.lock
+- runtimes/browser/agent_tools_browser/ (catalog, handoff, processes, server, session, validate, package entry)
+- runtimes/browser/tests/test_runtime.py
 
 Commands that worked / failed:
-- worked: `uv run scripts/check.py` exited 0 on the final tree.
-- worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` — 11 passed on the final tree.
+- Failed, then fixed: the first behavior run returned navigation interrupted by chrome-error://chromewebdata/ after a refused connection. A follow-up that settled the tab on about:blank was then interrupted by about:blank. Each navigate now uses a fresh tab. The suite after that fix passed.
+- Worked: `uv run scripts/check.py` (exit 0).
+- Worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed in 1.22s).
+- Worked: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (3 passed in 11.26s).
 
 Next action:
-- None. All fifteen acceptance rows pass. Do not push.
+- Human gate: a live handoff where Benny logs in through the noVNC page, which checks the page's look and that the session persists for the agent afterwards.
+- Not yet covered: the persistent profile surviving a runtime restart.
 
 Unresolved (non-blocking):
 - None.

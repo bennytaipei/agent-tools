@@ -1,0 +1,307 @@
+"""HTTP noVNC handoff for one live X display.
+
+Starts x11vnc and websockify, serves a page with the noVNC view and Done and
+Cancel buttons, and posts {reason, url, expires_at} to the notify webhook.
+Every path stops x11vnc and websockify.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import secrets
+import threading
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from agent_tools_browser.processes import (
+    Tracked,
+    port_is_open,
+    spawn,
+    stop_tracked,
+    tail_file,
+    wait_until_listening,
+)
+
+log = logging.getLogger("agent_tools_browser")
+
+NOVNC_WEB = "/usr/share/novnc"
+WEBHOOK_ENV = "AGENT_TOOLS_NOTIFY_WEBHOOK"
+
+
+class ShareError(RuntimeError):
+    pass
+
+
+class NotifyError(RuntimeError):
+    pass
+
+
+class HandoffShare:
+    def __init__(self, display: str, xauthority: Path, state_dir: Path, markers: list[str]) -> None:
+        self._display = display
+        self._xauthority = xauthority
+        self._state_dir = state_dir
+        self._markers = markers
+        self._token = secrets.token_urlsafe(32)
+        self._x11vnc: Tracked | None = None
+        self._websockify: Tracked | None = None
+        self._httpd: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self._done = threading.Event()
+        self._status = "timeout"
+        self.url = ""
+        self.novnc_port = 0
+        self.page_port = 0
+        self.vnc_port = 0
+
+    def start(self) -> None:
+        self._state_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.vnc_port = _free_port()
+            self.novnc_port = _free_port()
+            self._start_x11vnc()
+            self._start_websockify()
+            self._start_page()
+        except Exception as exc:
+            detail = self._stderr_tail()
+            self.stop()
+            raise ShareError(f"{exc}; {detail}".strip()) from exc
+
+    def notify_and_wait(self, reason: str, timeout: int, webhook: str) -> str:
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
+        payload = {"reason": reason, "url": self.url, "expires_at": expires_at}
+        try:
+            _post_json(webhook, payload)
+        except NotifyError:
+            self.stop()
+            raise
+        signaled = self._done.wait(timeout)
+        status = self._status if signaled else "timeout"
+        self.stop()
+        return status
+
+    def stop(self) -> None:
+        httpd = self._httpd
+        thread = self._thread
+        self._httpd = None
+        self._thread = None
+        if httpd is not None and thread is not None and thread.is_alive():
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+        elif httpd is not None:
+            httpd.server_close()
+        stop_tracked(self._websockify, self._markers)
+        self._websockify = None
+        stop_tracked(self._x11vnc, self._markers)
+        self._x11vnc = None
+
+    def _start_x11vnc(self) -> None:
+        log_path = self._state_dir / "x11vnc.log"
+        env = _child_env(self._display, self._xauthority)
+        tracked = spawn(
+            [
+                "x11vnc",
+                "-display",
+                self._display,
+                "-auth",
+                str(self._xauthority),
+                "-rfbport",
+                str(self.vnc_port),
+                "-localhost",
+                "-nopw",
+                "-forever",
+                "-shared",
+                "-noxdamage",
+                "-noxfixes",
+                "-noxrecord",
+                "-quiet",
+            ],
+            env=env,
+            label="x11vnc",
+            stderr_path=log_path,
+        )
+        self._x11vnc = tracked
+        wait_until_listening(self.vnc_port, tracked)
+
+    def _start_websockify(self) -> None:
+        token_path = self._state_dir / "novnc.token"
+        token_path.write_text(f"{self._token}: 127.0.0.1:{self.vnc_port}\n", encoding="utf-8")
+        token_path.chmod(0o600)
+        log_path = self._state_dir / "websockify.log"
+        tracked = spawn(
+            [
+                "websockify",
+                "--web",
+                NOVNC_WEB,
+                "--token-plugin",
+                "TokenFile",
+                "--token-source",
+                str(token_path),
+                f"127.0.0.1:{self.novnc_port}",
+            ],
+            env=_child_env(self._display, self._xauthority),
+            label="websockify",
+            stderr_path=log_path,
+        )
+        self._websockify = tracked
+        wait_until_listening(self.novnc_port, tracked)
+
+    def _start_page(self) -> None:
+        html = _page(self._token, self.novnc_port)
+        handler = _handler_class(self._token, html, self._accept)
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        httpd.daemon_threads = True
+        self.page_port = httpd.server_address[1]
+        self.url = f"http://127.0.0.1:{self.page_port}/h/{self._token}"
+        self._httpd = httpd
+        self._thread = threading.Thread(target=httpd.serve_forever, name="handoff-http", daemon=True)
+        self._thread.start()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if port_is_open(self.page_port):
+                return
+            time.sleep(0.02)
+        raise ShareError("handoff page did not listen")
+
+    def _accept(self, status: str) -> None:
+        if status not in {"done", "cancelled"}:
+            return
+        if not self._done.is_set():
+            self._status = status
+            self._done.set()
+
+    def _stderr_tail(self) -> str:
+        parts = []
+        for name in ("x11vnc.log", "websockify.log"):
+            text = tail_file(self._state_dir / name).strip()
+            if text:
+                parts.append(f"{name}: {text}")
+        return " | ".join(parts)
+
+
+def os_environ_webhook() -> str:
+    import os
+
+    return os.environ.get(WEBHOOK_ENV, "").strip()
+
+
+def _post_json(url: str, payload: dict[str, str]) -> None:
+    if not url:
+        raise NotifyError("webhook is not set")
+    parts = urlsplit(url)
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        raise NotifyError("webhook URL is not absolute http(s)")
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            response.read()
+            if response.status < 200 or response.status >= 300:
+                raise NotifyError(f"webhook status {response.status}")
+    except NotifyError:
+        raise
+    except urllib.error.HTTPError as exc:
+        raise NotifyError(f"webhook status {exc.code}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise NotifyError(str(exc)) from exc
+
+
+def _free_port() -> int:
+    with socket_bind() as sock:
+        return sock.getsockname()[1]
+
+
+def socket_bind():
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    return sock
+
+
+def _child_env(display: str, xauthority: Path) -> dict[str, str]:
+    import os
+
+    env = os.environ.copy()
+    env["DISPLAY"] = display
+    env["XAUTHORITY"] = str(xauthority)
+    env.pop("WAYLAND_DISPLAY", None)
+    return env
+
+
+def _page(token: str, novnc_port: int) -> bytes:
+    iframe = (
+        f"http://127.0.0.1:{novnc_port}/vnc.html?autoconnect=1&resize=scale"
+        f"&path=websockify%3Ftoken%3D{token}"
+    )
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Browser handoff</title>
+  <style>
+    body {{ margin: 0; font-family: sans-serif; }}
+    .bar {{ display: flex; gap: 8px; padding: 8px; background: #222; }}
+    button {{ font-size: 16px; padding: 8px 16px; }}
+    iframe {{ width: 100vw; height: calc(100vh - 52px); border: 0; }}
+  </style>
+</head>
+<body>
+  <div class="bar" data-novnc-port="{novnc_port}">
+    <form method="post" action="/h/{token}/done"><button type="submit">Done</button></form>
+    <form method="post" action="/h/{token}/cancel"><button type="submit">Cancel</button></form>
+  </div>
+  <iframe src="{iframe}" title="noVNC"></iframe>
+</body>
+</html>
+"""
+    return html.encode("utf-8")
+
+
+def _handler_class(token: str, html: bytes, accept):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            path = urlsplit(self.path).path
+            if path != f"/h/{token}":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(html)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(html)
+
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            if length:
+                self.rfile.read(length)
+            path = urlsplit(self.path).path
+            if path == f"/h/{token}/done":
+                status = "done"
+            elif path == f"/h/{token}/cancel":
+                status = "cancelled"
+            else:
+                self.send_error(404)
+                return
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            accept(status)
+
+        def log_message(self, fmt: str, *args) -> None:
+            return
+
+    return Handler
