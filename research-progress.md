@@ -17,7 +17,7 @@ Frozen acceptance (one row per criterion):
 
 Current state:
 - All ten acceptance rows pass. Catalog manifests stay at 1.0.0. No contract gap turned up, so no version bump.
-- Branch browser-runtime is local. Do not push.
+- Branch browser-runtime is pushed with a PR open for review.
 - After the behavior tests, displays in /tmp/.X11-unix are still X1, X10, X13, X16, and X3. No Xvfb, x11vnc, websockify, or Chrome process from this runtime remains.
 
 Decisions:
@@ -33,7 +33,7 @@ Decisions:
 - Env vars appear in docs by name only: AGENT_TOOLS_BROWSER_PROFILE, AGENT_TOOLS_NOTIFY_WEBHOOK, and optional AGENT_TOOLS_ROOT. The harness example has no env values.
 
 Done earlier:
-- Manifest contract locked (schema, checker, tests, CI) and four browser tools migrated to it. Draft teams.send_message at 0.1.0 proves a write tool with external auth. Manifests only. Those commits are local on main and were not pushed.
+- Manifest contract locked (schema, checker, tests, CI) and four browser tools migrated to it. Draft teams.send_message at 0.1.0 proves a write tool with external auth. Manifests only. Those commits are on origin/main at ebf7959, and CI passed.
 
 Files changed:
 - .gitignore
@@ -53,7 +53,8 @@ Commands that worked / failed:
 - Worked: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (3 passed in 11.26s).
 
 Next action:
-- None. Leave the branch local. Do not push.
+- Human gate: a live handoff where Benny logs in through the noVNC page, which checks the page's look and that the session persists for the agent afterwards.
+- Not yet covered: the persistent profile surviving a runtime restart.
 
 Unresolved (non-blocking):
 - None.
