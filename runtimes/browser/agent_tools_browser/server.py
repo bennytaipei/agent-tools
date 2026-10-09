@@ -18,7 +18,7 @@ from mcp.types import (
     Tool,
 )
 
-from agent_tools_browser.catalog import TOOL_NAMES, CatalogError, load_browser_manifests
+from agent_tools_browser.catalog import CatalogError, load_browser_manifests, mcp_tool_bindings
 from agent_tools_browser.session import BrowserSession
 from agent_tools_browser.validate import (
     declared_codes,
@@ -33,6 +33,9 @@ log = logging.getLogger("agent_tools_browser")
 class BrowserRuntime:
     def __init__(self, manifests: dict[str, dict]) -> None:
         self._manifests = manifests
+        # Exposed names are the tool segment. The harness server name is the namespace.
+        self._bindings = mcp_tool_bindings(manifests)
+        self._by_mcp_name = {exposed: qualified for exposed, qualified in self._bindings}
         self._browser = BrowserSession()
         self._lock = asyncio.Lock()
         self._mcp = Server(
@@ -59,11 +62,11 @@ class BrowserRuntime:
         _params: PaginatedRequestParams | None,
     ) -> ListToolsResult:
         tools = []
-        for name in TOOL_NAMES:
-            manifest = self._manifests[name]
+        for exposed, qualified in self._bindings:
+            manifest = self._manifests[qualified]
             tools.append(
                 Tool(
-                    name=manifest["name"],
+                    name=exposed,
                     description=manifest["when_to_use"],
                     input_schema=manifest["inputs"],
                     output_schema=manifest["outputs"],
@@ -76,10 +79,11 @@ class BrowserRuntime:
         _ctx: ServerRequestContext,
         params: CallToolRequestParams,
     ) -> CallToolResult:
-        manifest = self._manifests.get(params.name)
-        if manifest is None:
+        qualified = self._by_mcp_name.get(params.name)
+        if qualified is None:
             # Not a tool result code. The protocol reports an unknown method.
             raise ValueError(f"unknown tool {params.name}")
+        manifest = self._manifests[qualified]
         arguments = params.arguments if isinstance(params.arguments, dict) else {}
         problems = schema_errors(manifest["inputs"], arguments)
         if problems:
@@ -87,7 +91,7 @@ class BrowserRuntime:
             return _error(input_failure_code(manifest))
         async with self._lock:
             try:
-                outcome = await self._dispatch(params.name, arguments)
+                outcome = await self._dispatch(qualified, arguments)
             except Exception:
                 log.exception("tool %s failed", params.name)
                 outcome = operation_failure_code(manifest)

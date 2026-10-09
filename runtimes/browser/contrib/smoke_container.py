@@ -2,7 +2,7 @@
 """Smoke-test the browser runtime container over MCP stdio.
 
 Uses podman when it is on PATH, otherwise docker. Builds the image, runs it
-with -i, sends MCP initialize and tools/list, and calls browser.navigate
+with -i, sends MCP initialize and tools/list, and calls navigate
 against a page served on the host.
 
 Exit 0 when the smoke test passes. Exit 2 when neither engine is on PATH.
@@ -28,10 +28,10 @@ from mcp.client.stdio import StdioServerParameters
 REPO = Path(__file__).resolve().parents[3]
 IMAGE = "agent-tools-browser:smoke"
 TOOLS = (
-    "browser.navigate",
-    "browser.read",
-    "browser.screenshot",
-    "browser.handoff",
+    "navigate",
+    "read",
+    "screenshot",
+    "handoff",
 )
 
 
@@ -136,9 +136,9 @@ async def _exercise(engine: str, args: list[str], url: str) -> None:
         print("tools:", ", ".join(names))
         if names != list(TOOLS):
             raise SystemExit(f"expected {list(TOOLS)}, got {names}")
-        result = await client.call_tool("browser.navigate", {"url": url})
+        result = await client.call_tool("navigate", {"url": url})
         if result.is_error:
-            raise SystemExit(f"browser.navigate failed: {result.content[0].text}")
+            raise SystemExit(f"navigate failed: {result.content[0].text}")
         body = json.loads(result.content[0].text)
         print("url:", body.get("url"))
         if body.get("url") != url:

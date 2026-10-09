@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import socket
 import threading
 import time
@@ -23,6 +24,8 @@ import yaml
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
+from agent_tools_browser.catalog import TOOL_NAMES as CATALOG_NAMES
+from agent_tools_browser.catalog import mcp_tool_name
 from agent_tools_browser.handoff import (
     BIND_ENV,
     HANDOFF_PORT_ENV,
@@ -39,12 +42,9 @@ REPO = Path(__file__).resolve().parents[3]
 CATALOG = REPO / "catalog" / "browser"
 MARKER = "AGENT_TOOLS_MARKER"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
-TOOL_NAMES = (
-    "browser.navigate",
-    "browser.read",
-    "browser.screenshot",
-    "browser.handoff",
-)
+_MCP_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+EXPOSED_NAMES = ("navigate", "read", "screenshot", "handoff")
+_BY_EXPOSED = {mcp_tool_name(name): name for name in CATALOG_NAMES}
 
 
 def _manifests() -> dict[str, dict]:
@@ -228,6 +228,14 @@ async def _call(client: Client, name: str, arguments: dict | None = None):
     return await client.call_tool(name, arguments or {})
 
 
+def test_exposed_mcp_tool_names() -> None:
+    exposed = [mcp_tool_name(name) for name in CATALOG_NAMES]
+    assert exposed == list(EXPOSED_NAMES)
+    for name in exposed:
+        assert _MCP_NAME.fullmatch(name)
+    assert [mcp_tool_name(name) for name in _BY_EXPOSED.values()] == list(EXPOSED_NAMES)
+
+
 def test_browser_channel_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(CHANNEL_ENV, raising=False)
     assert browser_channel() == "chrome"
@@ -321,7 +329,7 @@ async def _notify_failed(tmp_path: Path) -> None:
         async with _client(profile, None) as client:
             result = await _call(
                 client,
-                "browser.handoff",
+                "handoff",
                 {"reason": "login wall", "timeout": 30},
             )
             code = _error_code(result)
@@ -342,7 +350,7 @@ async def _notify_post_fails(tmp_path: Path) -> None:
         async with _client(profile, f"http://127.0.0.1:{closed}/hook") as client:
             result = await _call(
                 client,
-                "browser.handoff",
+                "handoff",
                 {"reason": "login wall", "timeout": 30},
             )
             code = _error_code(result)
@@ -374,7 +382,7 @@ async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
     try:
         async with _client(profile, f"http://127.0.0.1:{hook_port}/hook", extra=extra) as client:
             task = asyncio.create_task(
-                _call(client, "browser.handoff", {"reason": "login wall", "timeout": 30})
+                _call(client, "handoff", {"reason": "login wall", "timeout": 30})
             )
             payload = await _webhook_or_result(task, received)
             assert list(payload) == ["reason", "url", "expires_at"]
@@ -445,51 +453,53 @@ def _assert_browser_binary(markers: list[str], channel: str | None) -> None:
 async def _assert_tools(client: Client) -> None:
     listed = await client.list_tools()
     names = [tool.name for tool in listed.tools]
-    assert names == list(TOOL_NAMES)
+    assert names == list(EXPOSED_NAMES)
     for tool in listed.tools:
-        manifest = MANIFESTS[tool.name]
+        assert _MCP_NAME.fullmatch(tool.name)
+        manifest = MANIFESTS[_BY_EXPOSED[tool.name]]
+        assert manifest["name"].endswith("." + tool.name)
         assert tool.description == manifest["when_to_use"]
         assert tool.input_schema == manifest["inputs"]
         assert tool.output_schema == manifest["outputs"]
 
 
 async def _assert_no_page(client: Client) -> None:
-    for name in ("browser.read", "browser.screenshot"):
+    for name in ("read", "screenshot"):
         result = await _call(client, name, {})
         code = _error_code(result)
         assert code == "no_page"
-        _assert_declared(name, code)
+        _assert_declared(_BY_EXPOSED[name], code)
 
 
 async def _assert_invalid_url(client: Client) -> None:
-    result = await _call(client, "browser.navigate", {"url": "not-a-url"})
+    result = await _call(client, "navigate", {"url": "not-a-url"})
     code = _error_code(result)
     assert code == "invalid_url"
-    _assert_declared("browser.navigate", code)
+    _assert_declared(_BY_EXPOSED["navigate"], code)
 
 
 async def _assert_navigation_failed(client: Client) -> None:
     port = _closed_port()
-    result = await _call(client, "browser.navigate", {"url": f"http://127.0.0.1:{port}/missing"})
+    result = await _call(client, "navigate", {"url": f"http://127.0.0.1:{port}/missing"})
     code = _error_code(result)
     assert code == "navigation_failed"
-    _assert_declared("browser.navigate", code)
+    _assert_declared(_BY_EXPOSED["navigate"], code)
 
 
 async def _assert_navigate_read_screenshot(client: Client, site_port: int, landed: str) -> None:
-    navigated = _payload(await _call(client, "browser.navigate", {"url": f"http://127.0.0.1:{site_port}/go"}))
+    navigated = _payload(await _call(client, "navigate", {"url": f"http://127.0.0.1:{site_port}/go"}))
     assert navigated == {"url": landed}
-    _assert_output("browser.navigate", navigated)
+    _assert_output(_BY_EXPOSED["navigate"], navigated)
 
-    read = _payload(await _call(client, "browser.read", {}))
+    read = _payload(await _call(client, "read", {}))
     assert read["url"] == landed
     assert MARKER in read["text"]
-    _assert_output("browser.read", read)
+    _assert_output(_BY_EXPOSED["read"], read)
 
-    shot = _payload(await _call(client, "browser.screenshot", {}))
+    shot = _payload(await _call(client, "screenshot", {}))
     raw = base64.b64decode(shot["image"], validate=True)
     assert raw.startswith(PNG_MAGIC)
-    _assert_output("browser.screenshot", shot)
+    _assert_output(_BY_EXPOSED["screenshot"], shot)
 
 
 async def _assert_handoff(
@@ -501,7 +511,7 @@ async def _assert_handoff(
     timeout: int,
 ) -> None:
     task = asyncio.create_task(
-        _call(client, "browser.handoff", {"reason": reason, "timeout": timeout})
+        _call(client, "handoff", {"reason": reason, "timeout": timeout})
     )
     payload = await _webhook_or_result(task, received)
     assert list(payload) == ["reason", "url", "expires_at"]

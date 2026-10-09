@@ -26,6 +26,34 @@ class CatalogError(RuntimeError):
     pass
 
 
+def mcp_tool_name(qualified: str) -> str:
+    """MCP name for a catalog manifest.
+
+    Grok Build and Claude Code admit only letters, digits, underscores, and
+    hyphens in a tool name. The harness server name is the namespace, so the
+    exposed name is the tool segment of `<namespace>.<tool>`.
+    """
+
+    namespace, separator, tool = qualified.partition(".")
+    if not separator or not namespace or not tool or "." in tool:
+        raise CatalogError(f"{qualified!r} is not a namespace.tool name")
+    return tool
+
+
+def mcp_tool_bindings(manifests: dict[str, dict]) -> list[tuple[str, str]]:
+    """Pairs of (exposed MCP name, catalog name) in catalog order."""
+
+    bindings: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name in manifests:
+        exposed = mcp_tool_name(name)
+        if exposed in seen:
+            raise CatalogError(f"duplicate MCP tool name {exposed}")
+        seen.add(exposed)
+        bindings.append((exposed, name))
+    return bindings
+
+
 def repo_root_from(start: Path) -> Path | None:
     for parent in [start, *start.parents]:
         if (parent / "catalog" / "browser" / "navigate.yaml").is_file():

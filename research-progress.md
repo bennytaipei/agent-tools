@@ -3,6 +3,8 @@
 Objective:
 Make the browser runtime deployable as a container on Benny's Mac (Apple Silicon, macOS, Podman with a linux/arm64 VM). The MCP harness launches it with `podman run -i` over stdio. The handoff page and noVNC are reachable from the Mac's browser at 127.0.0.1. Handoff notifies Benny with a macOS notification that opens the handoff page. Commit on main. Do not push.
 
+The deploy bug is fixed in the same tree: the runtime exposes MCP tool names as the tool segment only (`navigate`, `read`, `screenshot`, `handoff`). Catalog names stay fully qualified. That fix is committed on main and not pushed.
+
 Frozen acceptance (one row per criterion):
 1. Browser choice is configurable by env var. The default stays system Chrome (channel chrome), so current box behavior is unchanged. A documented env var selects Playwright's bundled Chromium, which works on linux/arm64 where Google Chrome does not exist. The behavior tests pass with both settings on this machine.
 2. Ports and URL host are configurable by env var: a fixed handoff page port, a fixed noVNC/websockify port, a bind address (0.0.0.0 inside a container), and the public host used in the URL posted to the webhook (default 127.0.0.1). When unset, the current free-port behavior is unchanged. A test covers fixed ports, and asserts that the posted url uses the configured public host and port.
@@ -14,16 +16,18 @@ Frozen acceptance (one row per criterion):
 8. This machine is shared and heavily loaded. Never kill processes you did not start. Clean up every process and container your tests start.
 
 Current state:
-- All eight rows are done on main. Not pushed.
+- MCP names the runtime exposes are `navigate`, `read`, `screenshot`, and `handoff`. Catalog names stay `browser.*`. check.py, catalog pytest, and the runtime tests passed for this fix. This checkpoint is part of that commit. Not pushed.
+- The eight container rows above are done on main. Not pushed. The commit before this fix is 49109bf (Containerfile base image tag).
+- Displays after the runtime tests are still X1, X10, X13, X16, and X3. No Chrome, Xvfb, x11vnc, or websockify process from this run remains.
 - Row 1: `AGENT_TOOLS_BROWSER_CHANNEL` unset or `chrome` keeps system Chrome. `chromium` uses Playwright's bundled Chromium. The behavior suite passed for both in one pytest run.
 - Row 2: `AGENT_TOOLS_HANDOFF_PORT`, `AGENT_TOOLS_NOVNC_PORT`, `AGENT_TOOLS_BIND_ADDRESS`, and `AGENT_TOOLS_PUBLIC_HOST`. Unset keeps free ports on 127.0.0.1. `test_fixed_ports_and_public_host` passed with bind `0.0.0.0`, public host `browser.example`, and fixed ports. The posted URL used that host and the handoff port.
 - Row 3: `runtimes/browser/Containerfile` is in the tree. It was not built on this machine (see row 4).
 - Row 4: podman and docker are not on PATH. `runtimes/browser/contrib/smoke_container.py` is kept for the Mac. Running it here printed `no container engine available; smoke test not run` and exited 2. The image was not built here.
 - Row 5: listener and `test_macos_notify.py` passed with osascript and open stubbed.
 - Row 6: plist `runtimes/browser/contrib/com.agent-tools.browser-notify.plist` and README section "Run on a Mac with Podman".
-- Row 7: catalog manifests unchanged. check.py exit 0. Catalog pytest 11 passed. Runtime pytest 11 passed.
+- Row 7: catalog manifests unchanged for the container work. check.py exit 0. Catalog pytest 11 passed. Runtime pytest 11 passed. The MCP name fix later re-ran the same commands: check.py exit 0, catalog pytest 11 passed, runtime pytest 12 passed.
 - Row 8: displays after the tests are still X1, X10, X13, X16, and X3. No Xvfb, x11vnc, websockify, or Chrome process from this runtime remains. No container was started.
-- Commits on main, not pushed: 8bd9924, a9a6eb7, 0267b86, and this checkpoint.
+- Commits on main, not pushed, before this fix: 8bd9924, a9a6eb7, 0267b86, ab35e42, and 49109bf.
 
 Decisions:
 - `AGENT_TOOLS_BROWSER_CHANNEL`: unset or `chrome` keeps system Chrome (`channel=chrome`, executable `/usr/bin/google-chrome`). `chromium` launches Playwright's bundled Chromium with no channel and no executable path. The image sets `chromium`.
@@ -33,25 +37,15 @@ Decisions:
 - The Mac listener binds `127.0.0.1` and reads `AGENT_TOOLS_MACOS_NOTIFY_PORT` (default 8767). The container webhook in the runbook is `http://host.containers.internal:8767/`.
 - OMP registration is `~/.omp/agent/mcp.json` (project file `.omp/mcp.json` uses the same shape). Grok Build is `~/.grok/config.toml`. Claude Code is a user-scoped stdio server.
 - Catalog manifests stay at their current versions. No contract gap turned up.
+- MCP tool names the runtime exposes are the tool segment only: `navigate`, `read`, `screenshot`, and `handoff`. `mcp_tool_name` in `runtimes/browser/agent_tools_browser/catalog.py` is the one place that derives that name from the manifest name (`browser.navigate` and the rest stay fully qualified). The harness server name `browser` is the namespace. Grok Build and Claude Code reject a dot in a tool name. Dispatch still switches on the qualified catalog name. `smoke_container.py` lists and calls those exposed names. Frozen row 4 above says the smoke test "calls browser.navigate"; that sentence describes the pre-fix script.
 
 Done earlier:
 - Browser reference runtime on main at 63ce837. Manifests at 1.0.0. Headed system Chrome on a private Xvfb display, handoff via x11vnc, websockify, and `/usr/share/novnc`, webhook `AGENT_TOOLS_NOTIFY_WEBHOOK`. Behavior tests cover navigate, read, screenshot, handoff done/cancelled/timeout, and notify_failed. CI runs the catalog check only, because ubuntu-latest lacks the display stack.
 - Manifest contract locked and four browser tools migrated. Draft teams.send_message at 0.1.0. Those commits are on main through ebf7959.
 
 Files changed:
-- .dockerignore
-- .github/workflows/check.yml
-- research-progress.md
-- runtimes/browser/Containerfile
-- runtimes/browser/README.md
-- runtimes/browser/agent_tools_browser/handoff.py
-- runtimes/browser/agent_tools_browser/processes.py
-- runtimes/browser/agent_tools_browser/session.py
-- runtimes/browser/contrib/com.agent-tools.browser-notify.plist
-- runtimes/browser/contrib/macos_notify.py
-- runtimes/browser/contrib/smoke_container.py
-- runtimes/browser/tests/test_macos_notify.py
-- runtimes/browser/tests/test_runtime.py
+- This fix: research-progress.md, runtimes/browser/README.md, runtimes/browser/agent_tools_browser/catalog.py, runtimes/browser/agent_tools_browser/server.py, runtimes/browser/contrib/smoke_container.py, runtimes/browser/tests/test_runtime.py.
+- Container files through 49109bf are already on main: .dockerignore, .github/workflows/check.yml, runtimes/browser/Containerfile, handoff.py, processes.py, session.py, the launchd plist, macos_notify.py, and test_macos_notify.py.
 
 Commands that worked / failed:
 - Worked: `uv run --project runtimes/browser playwright install chromium` (Chrome for Testing 153.0.8010.12 at ~/.cache/ms-playwright/chromium-1243).
@@ -59,11 +53,14 @@ Commands that worked / failed:
 - Worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed in 1.26s).
 - Worked: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (11 passed in 23.46s). That run covered default Chrome, bundled Chromium, fixed ports with public host `browser.example`, and the macOS listener stubs.
 - Recorded: `uv run --project runtimes/browser python runtimes/browser/contrib/smoke_container.py` printed `no container engine available; smoke test not run` and exited 2. `command -v podman` and `command -v docker` printed nothing, so the image was not built here.
+- Worked after the MCP name fix: `uv run scripts/check.py` (exit 0).
+- Worked after the MCP name fix: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed in 1.18s).
+- Worked after the MCP name fix: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (12 passed in 20.92s). The new test checks the four exposed names and the admission pattern.
 
 Next action:
-- None. Committed on main. Not pushed. The outer agent verifies and pushes.
-- Human gate: build the image on the Mac with Podman and run the smoke script, then a live handoff where Benny logs in through the published noVNC page.
+- None for this fix. Committed on main. Not pushed. The outer agent verifies and pushes.
+- Human gate: rebuild the image on the Mac with Podman and run the smoke script, then a live handoff where Benny logs in through the published noVNC page. Register the server as `browser`. The tools are `navigate`, `read`, `screenshot`, and `handoff`.
 
 Unresolved (non-blocking):
-- The Containerfile has not been built on this machine. The Mac smoke script is the build proof.
+- The Containerfile has not been built on this machine. The Mac smoke script is the build proof. An image built before this fix still advertises dotted tool names and will be skipped by Grok Build and Claude Code until it is rebuilt.
 - Podman on macOS reaches the Mac via host.containers.internal. The listener binds 127.0.0.1, as specified.

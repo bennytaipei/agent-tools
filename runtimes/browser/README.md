@@ -2,7 +2,7 @@
 
 Reference MCP server for the four browser tools. The manifests in `catalog/browser/` are the contract. This package loads each tool's name, description, and schemas from those files at startup.
 
-The server speaks MCP over stdio. A remote agent drives one headed Chrome session. On a login wall it calls `browser.handoff`. Benny opens the returned URL, uses the same live browser through noVNC, and presses Done or Cancel.
+The server speaks MCP over stdio. A remote agent drives one headed Chrome session. On a login wall it calls `handoff`. Benny opens the returned URL, uses the same live browser through noVNC, and presses Done or Cancel.
 
 ## Run
 
@@ -12,7 +12,7 @@ From the repo root, with nothing installed globally:
 uv run --project runtimes/browser python -m agent_tools_browser
 ```
 
-The default browser is the system binary `/usr/bin/google-chrome` (Playwright channel `chrome`). The process starts Xvfb on a free display and does not attach to a display that is already in use. `x11vnc` and `websockify` start only during `browser.handoff`, use a free port, and stop when the call returns. websockify serves the bundled noVNC files at `/usr/share/novnc`.
+The default browser is the system binary `/usr/bin/google-chrome` (Playwright channel `chrome`). The process starts Xvfb on a free display and does not attach to a display that is already in use. `x11vnc` and `websockify` start only during `handoff`, use a free port, and stop when the call returns. websockify serves the bundled noVNC files at `/usr/share/novnc`.
 
 ## Environment
 
@@ -45,7 +45,7 @@ Point the MCP client at the stdio command above. Put `AGENT_TOOLS_BROWSER_PROFIL
 
 Add `AGENT_TOOLS_BROWSER_PROFILE` and `AGENT_TOOLS_NOTIFY_WEBHOOK` to that server's environment in the host that launches the harness. Do not commit the values.
 
-The server exposes exactly `browser.navigate`, `browser.read`, `browser.screenshot`, and `browser.handoff`. Inputs that fail the manifest schema, and results that fail it, come back as that tool's declared error codes.
+The MCP tool names are `navigate`, `read`, `screenshot`, and `handoff`. Each one is the tool segment of the catalog manifest name (`browser.navigate` and the rest stay fully qualified in `catalog/browser/`). Register this server as `browser` so that server name is the namespace. Grok Build and Claude Code admit only letters, digits, underscores, and hyphens in a tool name. Inputs that fail the manifest schema, and results that fail it, come back as that tool's declared error codes.
 
 ## Run on a Mac with Podman
 
@@ -197,7 +197,7 @@ On a machine with podman or docker:
 uv run --project runtimes/browser python runtimes/browser/contrib/smoke_container.py
 ```
 
-The script builds the image, runs it with `-i`, checks MCP initialize and tools/list for the four browser tools, and calls `browser.navigate` on a page served from the host. It exits 2 when neither podman nor docker is on PATH. It removes only the container it started.
+The script builds the image, runs it with `-i`, checks MCP initialize and tools/list for `navigate`, `read`, `screenshot`, and `handoff`, and calls `navigate` on a page served from the host. It exits 2 when neither podman nor docker is on PATH. It removes only the container it started.
 
 ## Tests
 
