@@ -186,7 +186,12 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def wait_until_listening(port: int, tracked: Tracked, timeout: float = 5.0) -> None:
+def wait_until_listening(
+    port: int,
+    tracked: Tracked,
+    timeout: float = 5.0,
+    host: str = "127.0.0.1",
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if tracked.proc.poll() is not None:
@@ -194,12 +199,12 @@ def wait_until_listening(port: int, tracked: Tracked, timeout: float = 5.0) -> N
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.settimeout(0.2)
             try:
-                sock.connect(("127.0.0.1", port))
+                sock.connect((host, port))
             except OSError:
                 time.sleep(0.05)
                 continue
             return
-    raise ProcessError(f"{tracked.label} did not listen on {port}")
+    raise ProcessError(f"{tracked.label} did not listen on {host}:{port}")
 
 
 def port_is_open(port: int) -> bool:

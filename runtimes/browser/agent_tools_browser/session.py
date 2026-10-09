@@ -28,6 +28,8 @@ log = logging.getLogger("agent_tools_browser")
 
 CHROME_PATH = "/usr/bin/google-chrome"
 PROFILE_ENV = "AGENT_TOOLS_BROWSER_PROFILE"
+# unset or chrome: system Chrome. chromium: Playwright's bundled browser.
+CHANNEL_ENV = "AGENT_TOOLS_BROWSER_CHANNEL"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 CHROME_ARGS = [
     "--no-sandbox",
@@ -157,7 +159,8 @@ class BrowserSession:
                 return
             if self._profile is None or self._state is None:
                 raise ProcessError(f"{PROFILE_ENV} is not set")
-            if not Path(CHROME_PATH).is_file():
+            channel = browser_channel()
+            if channel == "chrome" and not Path(CHROME_PATH).is_file():
                 raise ProcessError(f"system Chrome is not at {CHROME_PATH}")
             self._profile.mkdir(parents=True, exist_ok=True)
             self._state.mkdir(parents=True, exist_ok=True)
@@ -171,17 +174,7 @@ class BrowserSession:
                 self._playwright = await async_playwright().start()
                 self._context = await self._playwright.chromium.launch_persistent_context(
                     str(self._profile),
-                    channel="chrome",
-                    executable_path=CHROME_PATH,
-                    headless=False,
-                    viewport={"width": 1280, "height": 800},
-                    args=CHROME_ARGS,
-                    env=_chrome_env(self._display, self._auth),
-                    handle_sigint=False,
-                    handle_sigterm=False,
-                    handle_sighup=False,
-                    chromium_sandbox=False,
-                    timeout=30000,
+                    **_launch_options(channel, self._display, self._auth),
                 )
                 if self._context.pages:
                     self._page = self._context.pages[0]
@@ -226,6 +219,42 @@ class BrowserSession:
             except Exception:
                 log.info("playwright stop did not finish cleanly")
         await asyncio.to_thread(reap, self._markers)
+
+
+def browser_channel() -> str:
+    """Which browser binary this process launches.
+
+    The default is system Chrome so a machine that already has
+    /usr/bin/google-chrome keeps the current behavior. chromium selects
+    Playwright's bundled Chromium, which is what the container image ships
+    on linux/arm64.
+    """
+
+    raw = os.environ.get(CHANNEL_ENV, "").strip().lower()
+    if raw in {"", "chrome"}:
+        return "chrome"
+    if raw == "chromium":
+        return "chromium"
+    raise ProcessError(f"{CHANNEL_ENV} must be chrome or chromium")
+
+
+def _launch_options(channel: str, display: str, auth: Path) -> dict:
+    options: dict = {
+        "headless": False,
+        "viewport": {"width": 1280, "height": 800},
+        "args": CHROME_ARGS,
+        "env": _chrome_env(display, auth),
+        "handle_sigint": False,
+        "handle_sigterm": False,
+        "handle_sighup": False,
+        "chromium_sandbox": False,
+        "timeout": 60000,
+    }
+    if channel == "chrome":
+        # channel chrome plus the system executable. Bundled Chromium omits both.
+        options["channel"] = "chrome"
+        options["executable_path"] = CHROME_PATH
+    return options
 
 
 def _profile_dir() -> Path | None:

@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import secrets
 import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -32,6 +35,11 @@ log = logging.getLogger("agent_tools_browser")
 
 NOVNC_WEB = "/usr/share/novnc"
 WEBHOOK_ENV = "AGENT_TOOLS_NOTIFY_WEBHOOK"
+HANDOFF_PORT_ENV = "AGENT_TOOLS_HANDOFF_PORT"
+NOVNC_PORT_ENV = "AGENT_TOOLS_NOVNC_PORT"
+BIND_ENV = "AGENT_TOOLS_BIND_ADDRESS"
+PUBLIC_HOST_ENV = "AGENT_TOOLS_PUBLIC_HOST"
+_HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
 
 
 class ShareError(RuntimeError):
@@ -40,6 +48,43 @@ class ShareError(RuntimeError):
 
 class NotifyError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ListenSettings:
+    """Where the handoff page and noVNC listen, and which host Benny's browser uses.
+
+    bind_host is the address inside this process (0.0.0.0 in a container).
+    public_host is the host in the URL posted to the webhook and in the page's
+    noVNC iframe. Benny opens that URL on the Mac, so it is the published host,
+    which defaults to 127.0.0.1. Unset ports stay ephemeral.
+    """
+
+    bind_host: str
+    public_host: str
+    page_port: int | None
+    novnc_port: int | None
+
+
+def listen_settings() -> ListenSettings:
+    return ListenSettings(
+        bind_host=_host_value(BIND_ENV, "127.0.0.1"),
+        public_host=_host_value(PUBLIC_HOST_ENV, "127.0.0.1"),
+        page_port=_optional_port(HANDOFF_PORT_ENV),
+        novnc_port=_optional_port(NOVNC_PORT_ENV),
+    )
+
+
+def probe_host(bind_host: str) -> str:
+    """Address this process can connect to in order to see its own listener."""
+
+    if bind_host in {"0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return bind_host
+
+
+class _ReuseHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
 
 
 class HandoffShare:
@@ -59,12 +104,19 @@ class HandoffShare:
         self.novnc_port = 0
         self.page_port = 0
         self.vnc_port = 0
+        self._bind_host = "127.0.0.1"
+        self._public_host = "127.0.0.1"
+        self._page_port_pref: int | None = None
 
     def start(self) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         try:
+            settings = listen_settings()
+            self._bind_host = settings.bind_host
+            self._public_host = settings.public_host
+            self._page_port_pref = settings.page_port
             self.vnc_port = _free_port()
-            self.novnc_port = _free_port()
+            self.novnc_port = settings.novnc_port if settings.novnc_port is not None else _free_port()
             self._start_x11vnc()
             self._start_websockify()
             self._start_page()
@@ -128,7 +180,7 @@ class HandoffShare:
             stderr_path=log_path,
         )
         self._x11vnc = tracked
-        wait_until_listening(self.vnc_port, tracked)
+        wait_until_listening(self.vnc_port, tracked, host="127.0.0.1")
 
     def _start_websockify(self) -> None:
         token_path = self._state_dir / "novnc.token"
@@ -144,22 +196,23 @@ class HandoffShare:
                 "TokenFile",
                 "--token-source",
                 str(token_path),
-                f"127.0.0.1:{self.novnc_port}",
+                f"{self._bind_host}:{self.novnc_port}",
             ],
             env=_child_env(self._display, self._xauthority),
             label="websockify",
             stderr_path=log_path,
         )
         self._websockify = tracked
-        wait_until_listening(self.novnc_port, tracked)
+        wait_until_listening(self.novnc_port, tracked, host=probe_host(self._bind_host))
 
     def _start_page(self) -> None:
-        html = _page(self._token, self.novnc_port)
+        html = _page(self._token, self.novnc_port, self._public_host)
         handler = _handler_class(self._token, html, self._accept)
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        page_port = 0 if self._page_port_pref is None else self._page_port_pref
+        httpd = _ReuseHTTPServer((self._bind_host, page_port), handler)
         httpd.daemon_threads = True
         self.page_port = httpd.server_address[1]
-        self.url = f"http://127.0.0.1:{self.page_port}/h/{self._token}"
+        self.url = f"http://{self._public_host}:{self.page_port}/h/{self._token}"
         self._httpd = httpd
         self._thread = threading.Thread(target=httpd.serve_forever, name="handoff-http", daemon=True)
         self._thread.start()
@@ -241,9 +294,30 @@ def _child_env(display: str, xauthority: Path) -> dict[str, str]:
     return env
 
 
-def _page(token: str, novnc_port: int) -> bytes:
+def _host_value(name: str, default: str) -> str:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    if not _HOST_RE.fullmatch(raw) or raw.startswith(".") or raw.endswith(".") or ".." in raw:
+        raise ShareError(f"{name} is not a host name")
+    return raw
+
+
+def _optional_port(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    if not raw.isdigit():
+        raise ShareError(f"{name} is not a TCP port")
+    port = int(raw)
+    if port < 1 or port > 65535:
+        raise ShareError(f"{name} is not a TCP port")
+    return port
+
+
+def _page(token: str, novnc_port: int, public_host: str) -> bytes:
     iframe = (
-        f"http://127.0.0.1:{novnc_port}/vnc.html?autoconnect=1&resize=scale"
+        f"http://{public_host}:{novnc_port}/vnc.html?autoconnect=1&resize=scale"
         f"&path=websockify%3Ftoken%3D{token}"
     )
     html = f"""<!DOCTYPE html>

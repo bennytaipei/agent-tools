@@ -23,7 +23,16 @@ import yaml
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
-from agent_tools_browser.processes import cmdline, pids_matching, port_is_open, reap
+from agent_tools_browser.handoff import (
+    BIND_ENV,
+    HANDOFF_PORT_ENV,
+    NOVNC_PORT_ENV,
+    PUBLIC_HOST_ENV,
+    ShareError,
+    listen_settings,
+)
+from agent_tools_browser.processes import ProcessError, cmdline, pids_matching, port_is_open, reap
+from agent_tools_browser.session import CHANNEL_ENV, browser_channel
 from agent_tools_browser.validate import validator_for
 
 REPO = Path(__file__).resolve().parents[3]
@@ -175,27 +184,43 @@ def _assert_closed(port: int) -> None:
     raise AssertionError(f"port {port} is still open")
 
 
-def _runtime_env(profile: Path, webhook: str | None) -> dict[str, str]:
+def _runtime_env(
+    profile: Path,
+    webhook: str | None,
+    *,
+    channel: str | None = None,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
     env = {
         "AGENT_TOOLS_BROWSER_PROFILE": str(profile),
         "AGENT_TOOLS_ROOT": str(REPO),
     }
     if webhook is not None:
         env["AGENT_TOOLS_NOTIFY_WEBHOOK"] = webhook
+    if channel is not None:
+        env[CHANNEL_ENV] = channel
+    if extra:
+        env.update(extra)
     return env
 
 
-def _client(profile: Path, webhook: str | None) -> Client:
+def _client(
+    profile: Path,
+    webhook: str | None,
+    *,
+    channel: str | None = None,
+    extra: dict[str, str] | None = None,
+) -> Client:
     import sys
 
     return Client(
         StdioServerParameters(
             command=sys.executable,
             args=["-m", "agent_tools_browser"],
-            env=_runtime_env(profile, webhook),
+            env=_runtime_env(profile, webhook, channel=channel, extra=extra),
             cwd=str(REPO),
         ),
-        read_timeout_seconds=120,
+        read_timeout_seconds=180,
     )
 
 
@@ -203,8 +228,46 @@ async def _call(client: Client, name: str, arguments: dict | None = None):
     return await client.call_tool(name, arguments or {})
 
 
-def test_browser_runtime(tmp_path: Path) -> None:
-    asyncio.run(_browser_runtime(tmp_path))
+def test_browser_channel_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(CHANNEL_ENV, raising=False)
+    assert browser_channel() == "chrome"
+    monkeypatch.setenv(CHANNEL_ENV, "chrome")
+    assert browser_channel() == "chrome"
+    monkeypatch.setenv(CHANNEL_ENV, "Chromium")
+    assert browser_channel() == "chromium"
+    monkeypatch.setenv(CHANNEL_ENV, "edge")
+    with pytest.raises(ProcessError):
+        browser_channel()
+
+
+def test_listen_settings_unset_keeps_free_ports(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in (HANDOFF_PORT_ENV, NOVNC_PORT_ENV, BIND_ENV, PUBLIC_HOST_ENV):
+        monkeypatch.delenv(name, raising=False)
+    settings = listen_settings()
+    assert settings.bind_host == "127.0.0.1"
+    assert settings.public_host == "127.0.0.1"
+    assert settings.page_port is None
+    assert settings.novnc_port is None
+
+
+def test_listen_settings_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(HANDOFF_PORT_ENV, "8765")
+    monkeypatch.setenv(NOVNC_PORT_ENV, "8766")
+    monkeypatch.setenv(BIND_ENV, "0.0.0.0")
+    monkeypatch.setenv(PUBLIC_HOST_ENV, "browser.example")
+    settings = listen_settings()
+    assert settings.page_port == 8765
+    assert settings.novnc_port == 8766
+    assert settings.bind_host == "0.0.0.0"
+    assert settings.public_host == "browser.example"
+    monkeypatch.setenv(HANDOFF_PORT_ENV, "0")
+    with pytest.raises(ShareError):
+        listen_settings()
+
+
+@pytest.mark.parametrize("channel", [None, "chromium"], ids=["chrome-default", "chromium"])
+def test_browser_runtime(tmp_path: Path, channel: str | None) -> None:
+    asyncio.run(_browser_runtime(tmp_path, channel))
 
 
 def test_notify_failed_when_webhook_unset(tmp_path: Path) -> None:
@@ -215,7 +278,11 @@ def test_notify_failed_when_post_fails(tmp_path: Path) -> None:
     asyncio.run(_notify_post_fails(tmp_path))
 
 
-async def _browser_runtime(tmp_path: Path) -> None:
+def test_fixed_ports_and_public_host(tmp_path: Path) -> None:
+    asyncio.run(_fixed_ports_and_public_host(tmp_path))
+
+
+async def _browser_runtime(tmp_path: Path, channel: str | None) -> None:
     profile = tmp_path / "profile"
     profile.mkdir()
     state = profile.parent / f"{profile.name}.runtime"
@@ -227,12 +294,13 @@ async def _browser_runtime(tmp_path: Path) -> None:
     hook_port = webhook.server_address[1]
     landed = f"http://127.0.0.1:{site_port}/landed"
     try:
-        async with _client(profile, f"http://127.0.0.1:{hook_port}/hook") as client:
+        async with _client(profile, f"http://127.0.0.1:{hook_port}/hook", channel=channel) as client:
             await _assert_tools(client)
             await _assert_no_page(client)
             await _assert_invalid_url(client)
             await _assert_navigation_failed(client)
             await _assert_navigate_read_screenshot(client, site_port, landed)
+            _assert_browser_binary(markers, channel)
             await _assert_handoff(client, received, "login wall", "done", "/done", 30)
             await _assert_handoff(client, received, "login wall", "cancelled", "/cancel", 30)
             await _assert_handoff(client, received, "login wall", "timeout", None, 1)
@@ -285,6 +353,93 @@ async def _notify_post_fails(tmp_path: Path) -> None:
             assert all("websockify" not in command and "x11vnc" not in command for command in commands)
     finally:
         reap(markers)
+
+
+async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    state = profile.parent / f"{profile.name}.runtime"
+    markers = [str(profile.resolve()), str(state.resolve())]
+    page_port, novnc_port = _two_free_ports()
+    received: Queue[dict] = Queue()
+    webhook = _start_webhook(received)
+    hook_port = webhook.server_address[1]
+    public_host = "browser.example"
+    extra = {
+        HANDOFF_PORT_ENV: str(page_port),
+        NOVNC_PORT_ENV: str(novnc_port),
+        BIND_ENV: "0.0.0.0",
+        PUBLIC_HOST_ENV: public_host,
+    }
+    try:
+        async with _client(profile, f"http://127.0.0.1:{hook_port}/hook", extra=extra) as client:
+            task = asyncio.create_task(
+                _call(client, "browser.handoff", {"reason": "login wall", "timeout": 30})
+            )
+            payload = await _webhook_or_result(task, received)
+            assert list(payload) == ["reason", "url", "expires_at"]
+            assert payload["reason"] == "login wall"
+            parsed = urlsplit(payload["url"])
+            assert parsed.scheme == "http"
+            assert parsed.hostname == public_host
+            assert parsed.port == page_port
+            assert parsed.path.startswith("/h/")
+            page_url = f"http://127.0.0.1:{page_port}{parsed.path}"
+            page = urllib.request.urlopen(page_url, timeout=5).read().decode()
+            assert ">Done<" in page
+            assert ">Cancel<" in page
+            assert f"http://{public_host}:{novnc_port}/vnc.html" in page
+            assert int(page.split('data-novnc-port="', 1)[1].split('"', 1)[0]) == novnc_port
+            assert port_is_open(novnc_port)
+            novnc = urllib.request.urlopen(f"http://127.0.0.1:{novnc_port}/vnc.html", timeout=5)
+            assert b"noVNC" in novnc.read()
+            request = urllib.request.Request(page_url + "/done", data=b"", method="POST")
+            with urllib.request.urlopen(request, timeout=5) as response:
+                assert response.status == 204
+            result = _payload(await task)
+            assert result == {"status": "done"}
+            _assert_output("browser.handoff", result)
+            _assert_closed(novnc_port)
+            _assert_closed(page_port)
+    finally:
+        webhook.shutdown()
+        webhook.server_close()
+        reap(markers)
+
+
+def _two_free_ports() -> tuple[int, int]:
+    sockets = []
+    ports: list[int] = []
+    for _ in range(2):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        ports.append(sock.getsockname()[1])
+        sockets.append(sock)
+    for sock in sockets:
+        sock.close()
+    return ports[0], ports[1]
+
+
+def _assert_browser_binary(markers: list[str], channel: str | None) -> None:
+    commands = []
+    for pid in pids_matching(markers):
+        command = cmdline(pid)
+        lowered = command.lower()
+        if "chrome" in lowered or "chromium" in lowered:
+            commands.append(command)
+    assert commands, "browser process not found"
+    if channel == "chromium":
+        assert any(
+            "chrome-linux" in command or "ms-playwright" in command for command in commands
+        ), commands
+        assert all(
+            "google-chrome" not in command and "/opt/google/chrome/" not in command
+            for command in commands
+        ), commands
+        return
+    assert any(
+        "google-chrome" in command or "/opt/google/chrome/" in command for command in commands
+    ), commands
 
 
 async def _assert_tools(client: Client) -> None:
