@@ -1,0 +1,10 @@
+# Build context is the repo root. Keep secrets, caches, and local environments out.
+.git
+**/.venv
+**/__pycache__
+**/.pytest_cache
+**/*.pyc
+*.txt
+**/*.txt
+.env
+**/.env

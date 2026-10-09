@@ -1,0 +1,62 @@
+# Browser MCP runtime. Build from the repo root:
+#   podman build -f runtimes/browser/Containerfile -t agent-tools-browser .
+#
+# The base image, apt packages, uv image, and Playwright Chromium builds are
+# published for linux/amd64 and linux/arm64. The browser is Playwright's
+# bundled Chromium (AGENT_TOOLS_BROWSER_CHANNEL=chromium).
+
+FROM python:3.12-bookworm-slim
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.21 /uv /uvx /bin/
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        novnc \
+        websockify \
+        x11-utils \
+        x11vnc \
+        xauth \
+        xvfb \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /tmp/.X11-unix \
+    && chmod 1777 /tmp/.X11-unix
+
+WORKDIR /opt/agent-tools
+
+COPY catalog /opt/agent-tools/catalog
+COPY runtimes/browser/pyproject.toml runtimes/browser/uv.lock /opt/agent-tools/runtimes/browser/
+COPY runtimes/browser/agent_tools_browser /opt/agent-tools/runtimes/browser/agent_tools_browser
+
+ENV UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/opt/agent-tools/runtimes/browser/.venv \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    AGENT_TOOLS_ROOT=/opt/agent-tools \
+    AGENT_TOOLS_BROWSER_CHANNEL=chromium \
+    AGENT_TOOLS_BIND_ADDRESS=0.0.0.0 \
+    AGENT_TOOLS_PUBLIC_HOST=127.0.0.1 \
+    AGENT_TOOLS_HANDOFF_PORT=8765 \
+    AGENT_TOOLS_NOVNC_PORT=8766 \
+    AGENT_TOOLS_BROWSER_PROFILE=/var/lib/agent-tools/profile \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN uv sync --frozen --no-dev --project /opt/agent-tools/runtimes/browser \
+    && uv run --frozen --no-dev --project /opt/agent-tools/runtimes/browser playwright install-deps chromium \
+    && mkdir -p /ms-playwright \
+    && env -u PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD \
+        uv run --frozen --no-dev --project /opt/agent-tools/runtimes/browser playwright install chromium \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /root/.cache/uv \
+    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin agent \
+    && mkdir -p /var/lib/agent-tools/profile \
+    && chown -R agent:agent /opt/agent-tools /var/lib/agent-tools
+
+VOLUME ["/var/lib/agent-tools/profile"]
+
+USER agent
+
+WORKDIR /opt/agent-tools
+
+ENTRYPOINT ["/opt/agent-tools/runtimes/browser/.venv/bin/python", "-m", "agent_tools_browser"]
