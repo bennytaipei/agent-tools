@@ -1,60 +1,69 @@
 # Checkpoint
 
 Objective:
-Build a reference runtime for the four browser tools so a remote headless agent can call them. The manifests in catalog/browser/ are the contract and the single source of truth. A remote agent drives Chrome on an authenticated site. On a login wall it calls browser.handoff, Benny takes the same live browser over HTTP noVNC, logs in, clicks Done, and the agent continues with that session. Do not change manifests unless the implementation proves a contract gap. Work on branch browser-runtime. Do not push.
+Make the browser runtime deployable as a container on Benny's Mac (Apple Silicon, macOS, Podman with a linux/arm64 VM). The MCP harness launches it with `podman run -i` over stdio. The handoff page and noVNC are reachable from the Mac's browser at 127.0.0.1. Handoff notifies Benny with a macOS notification that opens the handoff page. Commit on main. Do not push.
 
 Frozen acceptance (one row per criterion):
-1. The runtime lives under runtimes/browser/ as a Python package. Run it with `uv`, using pyproject dependencies or PEP 723 inline dependencies. Nothing gets installed globally.
-2. It is exposed as an MCP server over stdio with exactly four tools: browser.navigate, browser.read, browser.screenshot, and browser.handoff. Each tool's name, description, and input schema are loaded from the catalog manifest at startup, not copied by hand.
-3. The runtime validates every tool's inputs against the manifest's inputs schema and every result against its outputs schema. Failures return the manifest's declared error codes only. It never invents a code.
-4. Chrome comes from Playwright using the installed system Chrome (/usr/bin/google-chrome, channel chrome), with a persistent profile directory from an env var. It runs headed on its own Xvfb display, so handoff shows the exact same browser. It must not reuse or disturb displays or ports already in use on this machine. Pick free ones at runtime.
-5. browser.handoff(reason, timeout) starts x11vnc on the runtime's display and websockify with the bundled noVNC (/usr/share/novnc) on a free port, behind a random one-time token in the URL. It serves a small handoff page with the noVNC view plus Done and Cancel buttons. It notifies Benny by POSTing JSON {reason, url, expires_at} to the webhook in an env var (for example AGENT_TOOLS_NOTIFY_WEBHOOK). It blocks until Done, Cancel, or the timeout, then returns done, cancelled, or timeout. It stops x11vnc and websockify in every case, including errors. No env var or a failed POST means notify_failed, and the share is torn down.
-6. No secrets in the repo. Credentials and webhook URLs come only from env vars and appear in docs by name only.
-7. Behavior tests drive the real runtime against a local test HTTP server and a local webhook receiver, with no internet. navigate returns the final URL after a redirect. read returns text containing a literal string from the test page. screenshot returns base64 that decodes to PNG bytes. invalid_url and navigation_failed come back for bad input. Handoff returns done when the test POSTs Done, cancelled on Cancel, and timeout on a short timeout. In each handoff case, the noVNC port is closed afterwards and the webhook received {reason, url, expires_at}. notify_failed comes back when the webhook env var is unset. Every result validates against its manifest. Assert literal values.
-8. runtimes/browser/README.md explains how to run the server, the env vars by name, and how a harness registers it as an MCP server.
-9. scripts/check.py and the existing tests still pass. The new tests pass with one documented `uv run` command. CI runs the new tests too if they can run on ubuntu-latest. If they can't, say why in the workflow and keep the catalog check job green.
-10. This machine is heavily loaded and shared with other agents' desktops. Never kill processes you did not start. Clean up every Xvfb, x11vnc, websockify, and Chrome process your tests start.
+1. Browser choice is configurable by env var. The default stays system Chrome (channel chrome), so current box behavior is unchanged. A documented env var selects Playwright's bundled Chromium, which works on linux/arm64 where Google Chrome does not exist. The behavior tests pass with both settings on this machine.
+2. Ports and URL host are configurable by env var: a fixed handoff page port, a fixed noVNC/websockify port, a bind address (0.0.0.0 inside a container), and the public host used in the URL posted to the webhook (default 127.0.0.1). When unset, the current free-port behavior is unchanged. A test covers fixed ports, and asserts that the posted url uses the configured public host and port.
+3. runtimes/browser/Containerfile builds a multi-arch-safe image (it must build on linux/arm64 and linux/amd64). It contains Xvfb, x11vnc, websockify, noVNC, uv, the runtime, and Playwright Chromium with its OS deps. It uses the Chromium setting from row 1. It runs as a non-root user. The entrypoint is the MCP stdio server. The profile directory is a volume path. No secrets are baked in.
+4. If podman or docker is available on this machine, build the image here (amd64). Prove it with a scripted smoke test that runs it with `-i`, sends MCP initialize plus tools/list over stdio, and gets the four browser tools back, then calls browser.navigate on a page served from the host and gets the URL back. If no container engine is available here, say so in research-progress.md and keep the script for the Mac.
+5. runtimes/browser/contrib/macos_notify.py is a stdlib-only HTTP listener bound to 127.0.0.1 on a configurable port. On POST of {reason, url, expires_at}, it shows a macOS notification (osascript) with the reason and opens url in the default browser (`open`), then returns 204. Unit-test the request handling with the osascript and open calls stubbed. No macOS needed for the test.
+6. runtimes/browser/contrib/ has a launchd plist template for that listener, plus a doc section in runtimes/browser/README.md titled "Run on a Mac with Podman". It covers building the image, the exact `podman run -i --rm` command for MCP registration (published 127.0.0.1 ports, the named profile volume, and the webhook pointing at host.containers.internal), installing the listener, and registering with Grok Build, Claude Code, and OMP. Env vars appear by name. No secret values.
+7. All existing checks and tests still pass: `uv run scripts/check.py`, the catalog pytest, and the runtime behavior tests. Catalog manifests change only if a real contract gap appears, with a version bump per the README.
+8. This machine is shared and heavily loaded. Never kill processes you did not start. Clean up every process and container your tests start.
 
 Current state:
-- All ten acceptance rows pass. Catalog manifests stay at 1.0.0. No contract gap turned up, so no version bump.
-- Branch browser-runtime is pushed with a PR open for review.
-- After the behavior tests, displays in /tmp/.X11-unix are still X1, X10, X13, X16, and X3. No Xvfb, x11vnc, websockify, or Chrome process from this runtime remains.
+- All eight rows are done on main. Not pushed.
+- Row 1: `AGENT_TOOLS_BROWSER_CHANNEL` unset or `chrome` keeps system Chrome. `chromium` uses Playwright's bundled Chromium. The behavior suite passed for both in one pytest run.
+- Row 2: `AGENT_TOOLS_HANDOFF_PORT`, `AGENT_TOOLS_NOVNC_PORT`, `AGENT_TOOLS_BIND_ADDRESS`, and `AGENT_TOOLS_PUBLIC_HOST`. Unset keeps free ports on 127.0.0.1. `test_fixed_ports_and_public_host` passed with bind `0.0.0.0`, public host `browser.example`, and fixed ports. The posted URL used that host and the handoff port.
+- Row 3: `runtimes/browser/Containerfile` is in the tree. It was not built on this machine (see row 4).
+- Row 4: podman and docker are not on PATH. `runtimes/browser/contrib/smoke_container.py` is kept for the Mac. Running it here printed `no container engine available; smoke test not run` and exited 2. The image was not built here.
+- Row 5: listener and `test_macos_notify.py` passed with osascript and open stubbed.
+- Row 6: plist `runtimes/browser/contrib/com.agent-tools.browser-notify.plist` and README section "Run on a Mac with Podman".
+- Row 7: catalog manifests unchanged. check.py exit 0. Catalog pytest 11 passed. Runtime pytest 11 passed.
+- Row 8: displays after the tests are still X1, X10, X13, X16, and X3. No Xvfb, x11vnc, websockify, or Chrome process from this runtime remains. No container was started.
+- Commits on main, not pushed: 8bd9924, a9a6eb7, 0267b86, and this checkpoint.
 
 Decisions:
-- Branch is browser-runtime, cut from main tip ebf7959. Do not push.
-- Manifests stay untouched. The implementation maps onto the existing error codes.
-- MCP tool description is the manifest when_to_use string. input_schema and output_schema are the manifest inputs and outputs objects, loaded at startup.
-- A schema rejection uses a code that manifest already declares: invalid_url for navigate, share_failed for handoff, no_page for read and screenshot. Unexpected operational failures use navigation_failed, share_failed, no_page, or notify_failed. Error results are MCP is_error with text {"code":"<declared>"}. Success results carry structured content that matches the outputs schema.
-- format: uri is enforced with a checker this runtime adds, because the stock Draft 2020-12 checker does not implement uri. Navigate accepts only absolute http and https URLs.
-- Chrome runs headed (channel chrome, executable /usr/bin/google-chrome) on a private Xvfb display chosen at runtime from 200–499. The server process DISPLAY is not changed, and the MCP client does not pass the host DISPLAY. Each run has a private X authority file. Cleanup signals only processes whose command line contains this run's profile or state path, or a pid this run recorded with a matching start time.
-- Each navigate opens a new tab and closes the previous one. A refused connection leaves Chrome navigating to an error page, and that navigation was interrupting the next goto.
-- Handoff posts {reason, url, expires_at} to AGENT_TOOLS_NOTIFY_WEBHOOK. The url field is the handoff page. websockify listens on its own free port, serves /usr/share/novnc, and accepts the VNC websocket only with the one-time token. x11vnc and websockify stop before the tool returns, including notify_failed and share_failed. An unset webhook returns notify_failed before Chrome starts. A failed POST starts the share, then tears x11vnc and websockify down.
-- Browser behavior tests are not part of the catalog pytest run (root pytest.ini testpaths = tests). ubuntu-latest has no system Chrome, Xvfb, x11vnc, websockify, or /usr/share/novnc, so CI only runs the catalog check. The workflow comment records that and the local command.
-- Env vars appear in docs by name only: AGENT_TOOLS_BROWSER_PROFILE, AGENT_TOOLS_NOTIFY_WEBHOOK, and optional AGENT_TOOLS_ROOT. The harness example has no env values.
+- `AGENT_TOOLS_BROWSER_CHANNEL`: unset or `chrome` keeps system Chrome (`channel=chrome`, executable `/usr/bin/google-chrome`). `chromium` launches Playwright's bundled Chromium with no channel and no executable path. The image sets `chromium`.
+- `AGENT_TOOLS_HANDOFF_PORT` and `AGENT_TOOLS_NOVNC_PORT`: unset keeps a free port. A set value is the listen port. x11vnc stays on a free localhost port.
+- `AGENT_TOOLS_BIND_ADDRESS`: unset is `127.0.0.1`. The image sets `0.0.0.0`. `AGENT_TOOLS_PUBLIC_HOST`: unset is `127.0.0.1`. The posted URL and the page's noVNC iframe use the public host, because Benny's browser on the Mac loads them.
+- Image defaults: handoff port 8765, noVNC port 8766, profile `/var/lib/agent-tools/profile`, user `agent` (uid 1000). No webhook is baked in. The entrypoint is the venv Python MCP server. uv 0.12.21 is copied from the multi-arch uv image.
+- The Mac listener binds `127.0.0.1` and reads `AGENT_TOOLS_MACOS_NOTIFY_PORT` (default 8767). The container webhook in the runbook is `http://host.containers.internal:8767/`.
+- OMP registration is `~/.omp/agent/mcp.json` (project file `.omp/mcp.json` uses the same shape). Grok Build is `~/.grok/config.toml`. Claude Code is a user-scoped stdio server.
+- Catalog manifests stay at their current versions. No contract gap turned up.
 
 Done earlier:
-- Manifest contract locked (schema, checker, tests, CI) and four browser tools migrated to it. Draft teams.send_message at 0.1.0 proves a write tool with external auth. Manifests only. Those commits are on origin/main at ebf7959, and CI passed.
+- Browser reference runtime on main at 63ce837. Manifests at 1.0.0. Headed system Chrome on a private Xvfb display, handoff via x11vnc, websockify, and `/usr/share/novnc`, webhook `AGENT_TOOLS_NOTIFY_WEBHOOK`. Behavior tests cover navigate, read, screenshot, handoff done/cancelled/timeout, and notify_failed. CI runs the catalog check only, because ubuntu-latest lacks the display stack.
+- Manifest contract locked and four browser tools migrated. Draft teams.send_message at 0.1.0. Those commits are on main through ebf7959.
 
 Files changed:
-- .gitignore
-- pytest.ini
+- .dockerignore
 - .github/workflows/check.yml
 - research-progress.md
+- runtimes/browser/Containerfile
 - runtimes/browser/README.md
-- runtimes/browser/pyproject.toml
-- runtimes/browser/uv.lock
-- runtimes/browser/agent_tools_browser/ (catalog, handoff, processes, server, session, validate, package entry)
+- runtimes/browser/agent_tools_browser/handoff.py
+- runtimes/browser/agent_tools_browser/processes.py
+- runtimes/browser/agent_tools_browser/session.py
+- runtimes/browser/contrib/com.agent-tools.browser-notify.plist
+- runtimes/browser/contrib/macos_notify.py
+- runtimes/browser/contrib/smoke_container.py
+- runtimes/browser/tests/test_macos_notify.py
 - runtimes/browser/tests/test_runtime.py
 
 Commands that worked / failed:
-- Failed, then fixed: the first behavior run returned navigation interrupted by chrome-error://chromewebdata/ after a refused connection. A follow-up that settled the tab on about:blank was then interrupted by about:blank. Each navigate now uses a fresh tab. The suite after that fix passed.
+- Worked: `uv run --project runtimes/browser playwright install chromium` (Chrome for Testing 153.0.8010.12 at ~/.cache/ms-playwright/chromium-1243).
 - Worked: `uv run scripts/check.py` (exit 0).
-- Worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed in 1.22s).
-- Worked: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (3 passed in 11.26s).
+- Worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed in 1.26s).
+- Worked: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (11 passed in 23.46s). That run covered default Chrome, bundled Chromium, fixed ports with public host `browser.example`, and the macOS listener stubs.
+- Recorded: `uv run --project runtimes/browser python runtimes/browser/contrib/smoke_container.py` printed `no container engine available; smoke test not run` and exited 2. `command -v podman` and `command -v docker` printed nothing, so the image was not built here.
 
 Next action:
-- Human gate: a live handoff where Benny logs in through the noVNC page, which checks the page's look and that the session persists for the agent afterwards.
-- Not yet covered: the persistent profile surviving a runtime restart.
+- None. Committed on main. Not pushed. The outer agent verifies and pushes.
+- Human gate: build the image on the Mac with Podman and run the smoke script, then a live handoff where Benny logs in through the published noVNC page.
 
 Unresolved (non-blocking):
-- None.
+- The Containerfile has not been built on this machine. The Mac smoke script is the build proof.
+- Podman on macOS reaches the Mac via host.containers.internal. The listener binds 127.0.0.1, as specified.
