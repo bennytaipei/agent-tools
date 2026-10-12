@@ -1,25 +1,66 @@
 name: browser.read
-version: 1.0.0
-when_to_use: Return the text content of the page the remote browser is already on.
+version: 2.0.0
+when_to_use: Read the current page by looking at the screenshots, the way a person looks at the screen. One image is one viewport. When truncated is true, call again with a higher max_viewports to see the rest of the page.
 inputs:
   type: object
   additionalProperties: false
-  properties: {}
+  properties:
+    max_viewports:
+      type: integer
+      minimum: 1
+      maximum: 30
+      default: 10
+      description: Maximum number of viewports to capture. Defaults to 10.
 outputs:
   type: object
   additionalProperties: false
   required:
     - url
-    - text
+    - page_height
+    - viewport_height
+    - truncated
+    - viewports
   properties:
     url:
       type: string
       format: uri
       description: URL of the current page.
-    text:
-      type: string
-      description: Text content of the current page.
-side_effects: None. Does not navigate, click, or change the page.
+    page_height:
+      type: integer
+      minimum: 0
+      description: Height of the scrolled content in pixels.
+    viewport_height:
+      type: integer
+      minimum: 1
+      description: Height of one viewport step in pixels.
+    truncated:
+      type: boolean
+      description: True when the page is taller than the captured viewports.
+    viewports:
+      type: array
+      description: Viewport screenshots from the top of the page, in order.
+      items:
+        type: object
+        additionalProperties: false
+        required:
+          - index
+          - scroll_y
+          - image
+        properties:
+          index:
+            type: integer
+            minimum: 0
+            description: Zero-based viewport index.
+          scroll_y:
+            type: integer
+            minimum: 0
+            description: Scroll offset of this viewport in pixels.
+          image:
+            type: string
+            contentMediaType: image/png
+            contentEncoding: base64
+            description: PNG of this viewport.
+side_effects: None. Scrolls the page temporarily to capture each viewport and restores the original scroll position. Does not navigate or click.
 errors:
   - code: no_page
     when: The remote browser has no current page to read.

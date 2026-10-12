@@ -9,11 +9,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import re
 import socket
+import struct
 import threading
 import time
 import urllib.request
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
@@ -35,7 +38,13 @@ from agent_tools_browser.handoff import (
     listen_settings,
 )
 from agent_tools_browser.processes import ProcessError, cmdline, pids_matching, port_is_open, reap
-from agent_tools_browser.session import CHANNEL_ENV, browser_channel
+from agent_tools_browser.session import (
+    CHANNEL_ENV,
+    READ_MAX_VIEWPORTS_DEFAULT,
+    browser_channel,
+    normalize_max_viewports,
+    viewport_offsets,
+)
 from agent_tools_browser.validate import validator_for
 
 REPO = Path(__file__).resolve().parents[3]
@@ -236,6 +245,27 @@ def test_exposed_mcp_tool_names() -> None:
     assert [mcp_tool_name(name) for name in _BY_EXPOSED.values()] == list(EXPOSED_NAMES)
 
 
+def test_viewport_offsets() -> None:
+    offsets, truncated = viewport_offsets(800, 800, 10)
+    assert offsets == [0]
+    assert truncated is False
+    offsets, truncated = viewport_offsets(1601, 800, 10)
+    assert offsets == [0, 800, 1600]
+    assert truncated is False
+    offsets, truncated = viewport_offsets(8800, 800, READ_MAX_VIEWPORTS_DEFAULT)
+    assert offsets == [index * 800 for index in range(10)]
+    assert truncated is True
+    offsets, truncated = viewport_offsets(8800, 800, 30)
+    assert offsets == [index * 800 for index in range(11)]
+    assert truncated is False
+    assert normalize_max_viewports(None) == 10
+    assert normalize_max_viewports(1) == 1
+    assert normalize_max_viewports(30) == 30
+    assert normalize_max_viewports(0) is None
+    assert normalize_max_viewports(31) is None
+    assert normalize_max_viewports(True) is None
+
+
 def test_browser_channel_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(CHANNEL_ENV, raising=False)
     assert browser_channel() == "chrome"
@@ -288,6 +318,10 @@ def test_notify_failed_when_post_fails(tmp_path: Path) -> None:
 
 def test_fixed_ports_and_public_host(tmp_path: Path) -> None:
     asyncio.run(_fixed_ports_and_public_host(tmp_path))
+
+
+def test_read_viewports_scroll_and_restore(tmp_path: Path) -> None:
+    asyncio.run(_read_viewports_scroll_and_restore(tmp_path))
 
 
 async def _browser_runtime(tmp_path: Path, channel: str | None) -> None:
@@ -491,15 +525,25 @@ async def _assert_navigate_read_screenshot(client: Client, site_port: int, lande
     assert navigated == {"url": landed}
     _assert_output(_BY_EXPOSED["navigate"], navigated)
 
-    read = _payload(await _call(client, "read", {}))
+    read_result = await _call(client, "read", {})
+    read = _payload(read_result)
     assert read["url"] == landed
-    assert MARKER in read["text"]
+    assert "text" not in read
+    assert read["truncated"] is False
+    assert read["viewport_height"] >= 1
+    assert read["page_height"] >= 0
+    assert read["viewports"]
+    assert read["viewports"][0]["index"] == 0
+    assert read["viewports"][0]["scroll_y"] == 0
     _assert_output(_BY_EXPOSED["read"], read)
+    _assert_read_images(read_result, read)
 
-    shot = _payload(await _call(client, "screenshot", {}))
+    shot_result = await _call(client, "screenshot", {})
+    shot = _payload(shot_result)
     raw = base64.b64decode(shot["image"], validate=True)
     assert raw.startswith(PNG_MAGIC)
     _assert_output(_BY_EXPOSED["screenshot"], shot)
+    _assert_screenshot_image(shot_result, shot)
 
 
 async def _assert_handoff(
@@ -548,3 +592,258 @@ async def _assert_handoff(
     _assert_closed(page_port)
     with pytest.raises(Empty):
         received.get_nowait()
+
+
+def _assert_read_images(result, payload: dict) -> None:
+    viewports = payload["viewports"]
+    blocks = list(result.content)
+    assert blocks[0].type == "text"
+    assert json.loads(blocks[0].text) == payload
+    rest = blocks[1:]
+    assert len(rest) == 2 * len(viewports)
+    for index, viewport in enumerate(viewports):
+        label = rest[2 * index]
+        image = rest[2 * index + 1]
+        assert label.type == "text"
+        assert label.text == (
+            f"viewport {index + 1} of {len(viewports)}, scroll_y {viewport['scroll_y']}"
+        )
+        assert image.type == "image"
+        assert image.mime_type == "image/png"
+        assert image.data == viewport["image"]
+        raw = base64.b64decode(image.data, validate=True)
+        assert raw.startswith(PNG_MAGIC)
+
+
+def _assert_screenshot_image(result, payload: dict) -> None:
+    assert len(result.content) == 2
+    assert result.content[0].type == "text"
+    assert result.content[1].type == "image"
+    assert result.content[1].mime_type == "image/png"
+    assert result.content[1].data == payload["image"]
+    raw = base64.b64decode(result.content[1].data, validate=True)
+    assert raw.startswith(PNG_MAGIC)
+
+
+def _needed_viewports(page_height: int, viewport_height: int) -> int:
+    if page_height <= viewport_height:
+        return 1
+    return math.ceil(page_height / viewport_height)
+
+
+def _paeth(left: int, up: int, up_left: int) -> int:
+    estimate = left + up - up_left
+    left_dist = abs(estimate - left)
+    up_dist = abs(estimate - up)
+    up_left_dist = abs(estimate - up_left)
+    if left_dist <= up_dist and left_dist <= up_left_dist:
+        return left
+    if up_dist <= up_left_dist:
+        return up
+    return up_left
+
+
+def _png_center_rgb(data: bytes) -> tuple[int, int, int]:
+    """Return the center pixel of an 8-bit non-interlaced PNG."""
+
+    assert data.startswith(PNG_MAGIC)
+    pos = 8
+    width = height = color_type = None
+    idat = bytearray()
+    while pos + 8 <= len(data):
+        length = struct.unpack(">I", data[pos : pos + 4])[0]
+        ctype = data[pos + 4 : pos + 8]
+        chunk = data[pos + 8 : pos + 8 + length]
+        if ctype == b"IHDR":
+            width, height, bit_depth, color_type = struct.unpack(">IIBB", chunk[:10])
+            assert bit_depth == 8
+            assert chunk[10] == 0
+        elif ctype == b"IDAT":
+            idat.extend(chunk)
+        elif ctype == b"IEND":
+            break
+        pos += 12 + length
+    assert width and height and color_type in (2, 6)
+    channels = 3 if color_type == 2 else 4
+    raw = zlib.decompress(bytes(idat))
+    stride = width * channels
+    previous = bytearray(stride)
+    rows: list[bytearray] = []
+    cursor = 0
+    for _ in range(height):
+        filt = raw[cursor]
+        cursor += 1
+        row = bytearray(raw[cursor : cursor + stride])
+        cursor += stride
+        if filt == 1:
+            for column in range(stride):
+                left = row[column - channels] if column >= channels else 0
+                row[column] = (row[column] + left) & 255
+        elif filt == 2:
+            for column in range(stride):
+                row[column] = (row[column] + previous[column]) & 255
+        elif filt == 3:
+            for column in range(stride):
+                left = row[column - channels] if column >= channels else 0
+                row[column] = (row[column] + ((left + previous[column]) // 2)) & 255
+        elif filt == 4:
+            for column in range(stride):
+                left = row[column - channels] if column >= channels else 0
+                up = previous[column]
+                up_left = previous[column - channels] if column >= channels else 0
+                row[column] = (row[column] + _paeth(left, up, up_left)) & 255
+        elif filt != 0:
+            raise AssertionError(f"unsupported png filter {filt}")
+        previous = row
+        rows.append(row)
+    pixel = rows[height // 2]
+    start = (width // 2) * channels
+    return pixel[start], pixel[start + 1], pixel[start + 2]
+
+
+def _near(pixel: tuple[int, int, int], expected: tuple[int, int, int], tolerance: int = 8) -> bool:
+    return all(abs(pixel[channel] - expected[channel]) <= tolerance for channel in range(3))
+
+
+_RED = (255, 0, 0)
+_GREEN = (0, 255, 0)
+_BLUE = (0, 0, 255)
+
+
+def _color_page(inner: bool) -> str:
+    scroll = (
+        "html, body { margin: 0; height: 100%; overflow: hidden; }"
+        "#app { height: 100%; overflow: auto; }"
+        if inner
+        else "html, body { margin: 0; }"
+    )
+    open_tag = '<div id="app">' if inner else ""
+    close_tag = "</div>" if inner else ""
+    return f"""<!DOCTYPE html>
+<html><head><style>
+{scroll}
+#top {{ height: 800px; background: #ff0000; }}
+#mid {{ height: 1600px; background: #00ff00; }}
+#bottom {{ height: 800px; background: #0000ff; }}
+</style></head><body>
+{open_tag}
+<div id="top"></div><div id="mid"></div><div id="bottom"></div>
+{close_tag}
+<script>
+var name = location.hash.replace("#", "");
+var target = name ? document.getElementById(name) : null;
+if (target) target.scrollIntoView();
+</script>
+</body></html>"""
+
+
+def _start_pages(pages: dict[str, bytes]) -> ThreadingHTTPServer:
+    class Handler(_QuietHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            body = pages.get(urlsplit(self.path).path)
+            if body is None:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    return _serve(Handler)
+
+
+def _assert_scroll_steps(payload: dict) -> None:
+    viewports = payload["viewports"]
+    height = payload["viewport_height"]
+    ys = [item["scroll_y"] for item in viewports]
+    assert ys[0] == 0
+    assert [item["index"] for item in viewports] == list(range(len(viewports)))
+    for prev, nxt in zip(ys, ys[1:]):
+        assert 0 < nxt - prev <= height
+
+
+async def _read_viewports_scroll_and_restore(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    state = profile.parent / f"{profile.name}.runtime"
+    markers = [str(profile.resolve()), str(state.resolve())]
+    tall = (
+        "<!DOCTYPE html><html><head><style>html, body { margin: 0; }</style></head>"
+        "<body><div style=\"height:9600px;background:#ff0000\"></div></body></html>"
+    ).encode()
+    pages = {
+        "/tall": tall,
+        "/restore": _color_page(False).encode(),
+        "/inner": _color_page(True).encode(),
+    }
+    site = _start_pages(pages)
+    port = site.server_address[1]
+    try:
+        async with _client(profile, None) as client:
+            await _assert_tall_read(client, port)
+            await _assert_scroll_restored(client, port, "/restore")
+            await _assert_scroll_restored(client, port, "/inner")
+    finally:
+        site.shutdown()
+        site.server_close()
+        reap(markers)
+
+
+async def _assert_tall_read(client: Client, port: int) -> None:
+    navigated = _payload(await _call(client, "navigate", {"url": f"http://127.0.0.1:{port}/tall"}))
+    assert navigated["url"].endswith("/tall")
+    capped = _payload(await _call(client, "read", {}))
+    _assert_output("browser.read", capped)
+    needed = _needed_viewports(capped["page_height"], capped["viewport_height"])
+    assert needed > READ_MAX_VIEWPORTS_DEFAULT
+    assert len(capped["viewports"]) == READ_MAX_VIEWPORTS_DEFAULT
+    assert capped["truncated"] is True
+    _assert_scroll_steps(capped)
+    _assert_png(capped["viewports"][0]["image"])
+
+    one_result = await _call(client, "read", {"max_viewports": 1})
+    one = _payload(one_result)
+    assert len(one["viewports"]) == 1
+    assert one["truncated"] is True
+    assert one["viewports"][0]["scroll_y"] == 0
+    _assert_read_images(one_result, one)
+
+    full = _payload(await _call(client, "read", {"max_viewports": 30}))
+    assert full["truncated"] is False
+    assert len(full["viewports"]) == _needed_viewports(full["page_height"], full["viewport_height"])
+    assert len(full["viewports"]) > READ_MAX_VIEWPORTS_DEFAULT
+    _assert_scroll_steps(full)
+
+    for bad in (0, 31):
+        result = await _call(client, "read", {"max_viewports": bad})
+        code = _error_code(result)
+        assert code == "no_page"
+        _assert_declared("browser.read", code)
+
+
+def _assert_png(image: str) -> None:
+    raw = base64.b64decode(image, validate=True)
+    assert raw.startswith(PNG_MAGIC)
+
+
+async def _assert_scroll_restored(client: Client, port: int, path: str) -> None:
+    url = f"http://127.0.0.1:{port}{path}#mid"
+    navigated = _payload(await _call(client, "navigate", {"url": url}))
+    assert navigated["url"].split("#", 1)[0].endswith(path)
+    before = _payload(await _call(client, "screenshot", {}))
+    assert _near(_png_center_rgb(base64.b64decode(before["image"])), _GREEN), path
+    read_result = await _call(client, "read", {})
+    read = _payload(read_result)
+    _assert_output("browser.read", read)
+    assert len(read["viewports"]) >= 3
+    assert read["truncated"] is False
+    _assert_scroll_steps(read)
+    _assert_read_images(read_result, read)
+    first = _png_center_rgb(base64.b64decode(read["viewports"][0]["image"]))
+    assert _near(first, _RED), (path, first)
+    last = _png_center_rgb(base64.b64decode(read["viewports"][-1]["image"]))
+    assert _near(last, _BLUE), (path, last)
+    after = _payload(await _call(client, "screenshot", {}))
+    restored = _png_center_rgb(base64.b64decode(after["image"]))
+    assert _near(restored, _GREEN), (path, restored)

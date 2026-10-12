@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import math
 import os
 import subprocess
 import time
@@ -31,6 +32,8 @@ PROFILE_ENV = "AGENT_TOOLS_BROWSER_PROFILE"
 # unset or chrome: system Chrome. chromium: Playwright's bundled browser.
 CHANNEL_ENV = "AGENT_TOOLS_BROWSER_CHANNEL"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+READ_MAX_VIEWPORTS_DEFAULT = 10
+READ_MAX_VIEWPORTS_LIMIT = 30
 CHROME_ARGS = [
     "--no-sandbox",
     "--disable-dev-shm-usage",
@@ -44,6 +47,107 @@ CHROME_ARGS = [
     "--window-size=1280,800",
     "--window-position=0,0",
 ]
+
+# The document is the page scroller when it overflows. Otherwise the largest
+# overflow box is the page, which is how a full-height app shell scrolls.
+_MEASURE_SCROLLER_JS = """
+() => {
+  const doc = document.scrollingElement || document.documentElement;
+  const viewH = window.innerHeight || doc.clientHeight || 0;
+  const docH = doc.scrollHeight || 0;
+  let target = doc;
+  let kind = "document";
+  if (docH <= viewH + 1 && document.body) {
+    let best = null;
+    let bestArea = 0;
+    for (const el of document.body.querySelectorAll("*")) {
+      if (!(el instanceof HTMLElement)) continue;
+      const oy = getComputedStyle(el).overflowY;
+      if (oy !== "auto" && oy !== "scroll" && oy !== "overlay") continue;
+      if (el.scrollHeight <= el.clientHeight + 1) continue;
+      const area = el.clientWidth * el.clientHeight;
+      if (area > bestArea) {
+        best = el;
+        bestArea = area;
+      }
+    }
+    if (best) {
+      target = best;
+      kind = "element";
+    }
+  }
+  window.__agentToolsReadScroller = target;
+  const pageHeight = kind === "document" ? docH : target.scrollHeight;
+  const viewportHeight = kind === "document" ? viewH : target.clientHeight;
+  const scrollY = kind === "document" ? window.scrollY : target.scrollTop;
+  const scrollX = kind === "document" ? window.scrollX : target.scrollLeft;
+  return {
+    kind,
+    pageHeight: Math.round(pageHeight),
+    viewportHeight: Math.round(viewportHeight),
+    scrollY: Math.round(scrollY),
+    scrollX: Math.round(scrollX),
+  };
+}
+"""
+
+_SCROLL_JS = """
+(y) => {
+  const el = window.__agentToolsReadScroller;
+  const doc = document.scrollingElement || document.documentElement;
+  if (!el || el === doc || el === document.documentElement || el === document.body) {
+    window.scrollTo(0, y);
+    return Math.round(window.scrollY);
+  }
+  el.scrollTop = y;
+  return Math.round(el.scrollTop);
+}
+"""
+
+_RESTORE_JS = """
+({x, y}) => {
+  const el = window.__agentToolsReadScroller;
+  const doc = document.scrollingElement || document.documentElement;
+  if (!el || el === doc || el === document.documentElement || el === document.body) {
+    window.scrollTo(x, y);
+  } else {
+    el.scrollLeft = x;
+    el.scrollTop = y;
+  }
+  delete window.__agentToolsReadScroller;
+}
+"""
+
+_NEXT_FRAME_JS = """
+() => new Promise((resolve) => {
+  requestAnimationFrame(() => requestAnimationFrame(() => resolve(true)));
+})
+"""
+
+
+def normalize_max_viewports(value: object) -> int | None:
+    """Return a legal viewport cap, or None when the value is outside 1..30."""
+
+    if value is None:
+        return READ_MAX_VIEWPORTS_DEFAULT
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value < 1 or value > READ_MAX_VIEWPORTS_LIMIT:
+        return None
+    return value
+
+
+def viewport_offsets(page_height: int, viewport_height: int, max_viewports: int) -> tuple[list[int], bool]:
+    """Scroll offsets from the top, and whether the cap cut the page short."""
+
+    if viewport_height < 1 or max_viewports < 1:
+        return [], True
+    if page_height <= viewport_height:
+        needed = 1
+    else:
+        needed = math.ceil(page_height / viewport_height)
+    count = min(needed, max_viewports)
+    return [index * viewport_height for index in range(count)], needed > max_viewports
 
 
 class BrowserSession:
@@ -97,18 +201,61 @@ class BrowserSession:
                 log.info("could not close the previous page")
         return page
 
-    async def read(self) -> dict | str:
+    async def read(self, max_viewports: int | None = None) -> dict | str:
         if not self._has_page or self._page is None:
             return "no_page"
+        limit = normalize_max_viewports(max_viewports)
+        if limit is None:
+            return "no_page"
+        page = self._page
+        origin: dict | None = None
         try:
-            text = await self._page.inner_text("body")
-            url = self._page.url
+            try:
+                await page.wait_for_load_state("load", timeout=3000)
+            except Exception:
+                log.info("read continuing before the load event")
+            origin = await page.evaluate(_MEASURE_SCROLLER_JS)
+            page_height = int(origin["pageHeight"])
+            viewport_height = int(origin["viewportHeight"])
+            offsets, truncated = viewport_offsets(page_height, viewport_height, limit)
+            if viewport_height < 1 or not offsets:
+                return "no_page"
+            viewports = []
+            for index, offset in enumerate(offsets):
+                actual = int(await page.evaluate(_SCROLL_JS, offset))
+                await page.evaluate(_NEXT_FRAME_JS)
+                png = await page.screenshot(type="png", animations="disabled")
+                if not isinstance(png, bytes) or not png.startswith(PNG_MAGIC):
+                    return "no_page"
+                viewports.append(
+                    {
+                        "index": index,
+                        "scroll_y": actual,
+                        "image": base64.b64encode(png).decode("ascii"),
+                    }
+                )
+            url = page.url
         except Exception:
             log.exception("read failed")
             return "no_page"
+        finally:
+            if origin is not None:
+                try:
+                    await page.evaluate(
+                        _RESTORE_JS,
+                        {"x": int(origin["scrollX"]), "y": int(origin["scrollY"])},
+                    )
+                except Exception:
+                    log.info("could not restore scroll after read")
         if not is_http_url(url):
             return "no_page"
-        return {"url": url, "text": text}
+        return {
+            "url": url,
+            "page_height": page_height,
+            "viewport_height": viewport_height,
+            "truncated": truncated,
+            "viewports": viewports,
+        }
 
     async def screenshot(self) -> dict | str:
         if not self._has_page or self._page is None:

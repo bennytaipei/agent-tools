@@ -108,7 +108,26 @@ def test_browser_manifests():
     assert manifests["read.yaml"]["name"] == "browser.read"
     assert manifests["screenshot.yaml"]["name"] == "browser.screenshot"
     assert manifests["handoff.yaml"]["name"] == "browser.handoff"
-    assert {body["version"] for body in manifests.values()} == {"1.0.0"}
+    assert manifests["read.yaml"]["version"] == "2.0.0"
+    assert manifests["navigate.yaml"]["version"] == "1.0.0"
+    assert manifests["screenshot.yaml"]["version"] == "1.0.0"
+    assert manifests["handoff.yaml"]["version"] == "1.0.0"
+    read_inputs = manifests["read.yaml"]["inputs"]["properties"]["max_viewports"]
+    assert read_inputs["type"] == "integer"
+    assert read_inputs["minimum"] == 1
+    assert read_inputs["maximum"] == 30
+    assert read_inputs["default"] == 10
+    assert "text" not in manifests["read.yaml"]["outputs"]["properties"]
+    assert manifests["read.yaml"]["outputs"]["required"] == [
+        "url",
+        "page_height",
+        "viewport_height",
+        "truncated",
+        "viewports",
+    ]
+    assert "truncated" in manifests["read.yaml"]["when_to_use"]
+    assert "max_viewports" in manifests["read.yaml"]["when_to_use"]
+    assert "restores" in manifests["read.yaml"]["side_effects"]
 
     assert {item["code"] for item in manifests["navigate.yaml"]["errors"]} == {
         "invalid_url",

@@ -23,24 +23,26 @@ A. Before changing read, a fixture page and a real run record what current `brow
 
 Human-visible in the Part A table means visible in the initial 800x1280 viewport without scrolling the page or the overflow box. The fixture records that itself (`LAYOUT` lines in the read text). Viewport height was 800. `below_top` was 2336.
 
-| case | expected human-visible? | returned by read? | notes |
-| --- | --- | --- | --- |
-| below the fold (`BELOW_THE_FOLD`) | no | yes | `below_in_viewport=false`, `below_top=2336`. `inner_text` still returned the paragraph. |
-| overflow box, scrolled out (`OVERFLOW_SCROLLED_AWAY`) | no | yes | `overflow_away_in_box=false`, `overflow_scroll_top=296`, client height 80, scroll height 376. The string was in the read text. |
-| overflow box, in view (`OVERFLOW_BOTTOM_VISIBLE`) | yes | yes | `overflow_bottom_in_box=true`. Control for the box. |
-| `display: none` (`DISPLAY_NONE_TEXT`) | no | no | `display=none`. Marker absent from the read text. |
-| `visibility: hidden` (`VISIBILITY_HIDDEN_TEXT`) | no | no | `visibility=hidden`. Marker absent from the read text. |
-| open shadow root (`OPEN_SHADOW_TEXT`) | yes | no | `shadow_in_viewport=true`, `shadow_mode=open`. Marker absent. `inner_text` does not enter the shadow tree. |
-| same-origin iframe (`IFRAME_SAME_ORIGIN`) | yes | no | `iframe_in_viewport=true`, `iframe_src=frame.html`. The child document was fetched (HTTP 200). Marker absent. |
-| canvas (`CANVAS_ONLY_TEXT`) | yes | no | `canvas_in_viewport=true`, `canvas_pixels=filled`. Marker absent. The glyphs are pixels. |
-| on-screen control (`VISIBLE_ON_SCREEN`) | yes | yes | `visible_in_viewport=true`. |
+`visible in vision read?` is from a second run of the same fixture through `browser.read` 2.0.0. That call returned 4 viewports (`page_height` 2793, `viewport_height` 800, `truncated` false, `scroll_y` 0, 800, 1600, 1993). The PNGs were inspected: viewport 0 shows the top of the page; viewports 2 and 3 show `BELOW_THE_FOLD`; viewport 1 is the blank spacer.
+
+| case | expected human-visible? | returned by read 1.0 (`inner_text`)? | visible in vision read? | notes |
+| --- | --- | --- | --- | --- |
+| below the fold (`BELOW_THE_FOLD`) | no | yes | yes | `below_in_viewport=false`, `below_top=2336`. `inner_text` returned the paragraph. Vision read shows it at `scroll_y` 1600 and 1993. |
+| overflow box, scrolled out (`OVERFLOW_SCROLLED_AWAY`) | no | yes | no | `overflow_away_in_box=false`, `overflow_scroll_top=296`, client height 80, scroll height 376. `inner_text` returned it. The viewport PNG shows the box scrolled to `OVERFLOW_BOTTOM_VISIBLE` only. Page scroll does not move that box. |
+| overflow box, in view (`OVERFLOW_BOTTOM_VISIBLE`) | yes | yes | yes | `overflow_bottom_in_box=true`. Painted inside the box in viewport 0. |
+| `display: none` (`DISPLAY_NONE_TEXT`) | no | no | no | `display=none`. Marker absent from the read text and from every viewport PNG. |
+| `visibility: hidden` (`VISIBILITY_HIDDEN_TEXT`) | no | no | no | `visibility=hidden`. Marker absent from the read text and from every viewport PNG. |
+| open shadow root (`OPEN_SHADOW_TEXT`) | yes | no | yes | `shadow_in_viewport=true`, `shadow_mode=open`. `inner_text` missed it. Viewport 0 shows the text. |
+| same-origin iframe (`IFRAME_SAME_ORIGIN`) | yes | no | yes | `iframe_in_viewport=true`, `iframe_src=frame.html` (HTTP 200). `inner_text` missed it. Viewport 0 shows the iframe text. |
+| canvas (`CANVAS_ONLY_TEXT`) | yes | no | yes | `canvas_in_viewport=true`, `canvas_pixels=filled`. `inner_text` missed it. Viewport 0 shows the canvas glyphs. |
+| on-screen control (`VISIBLE_ON_SCREEN`) | yes | yes | yes | `visible_in_viewport=true`. Viewport 0 shows it. |
 
 Current state:
-- On main at 2167ef1. Not pushed by this session.
-- Row A measurement is done. Read implementation is still `inner_text("body")`. Fixture: `tests/fixtures/browser_read/read_visibility.html` and `frame.html`. Evidence: one MCP `navigate` + `read` on that page. The read JSON is quoted in Commands below.
-- Displays before the measurement: X1, X2, X10, X13. The measurement used Xvfb :200 and that display is gone. Those four displays remain. No Chrome from this task remains.
+- Part A is committed as e4d1442. Not pushed.
+- `browser.read` 2.0.0 is implemented in the working tree: viewport screenshots, `max_viewports`, scroll restore, MCP image blocks for read and screenshot. Screenshot manifest stays 1.0.0.
+- The vision column in the table above is filled from the fixture re-run. Behavior tests cover a tall page (default cap 10, `max_viewports` 1 and 30), document scroll restore, and an inner overflow scroller.
+- Displays before this task: X1, X2, X10, X13. Runs used Xvfb :200 and that display is gone. Those four displays remain. No Chrome from this task remains.
 - No container engine is on PATH (`docker` and `podman` are absent). The image will not be built on this machine. CI row 10 is the docker build.
-- Vision-read column is not in the table yet. Part B adds it after the new read lands.
 
 Decisions:
 - Measure with the existing MCP `read` tool against a local fixture before editing `session.read`.
@@ -59,12 +61,12 @@ Files changed:
 Commands that worked / failed:
 - Worked: `uv run --project runtimes/browser python /tmp/measure_read.py`. Navigate returned the fixture URL. Read returned `inner_text` JSON. Marker membership: VISIBLE_ON_SCREEN yes, OVERFLOW_SCROLLED_AWAY yes, OVERFLOW_BOTTOM_VISIBLE yes, DISPLAY_NONE_TEXT no, VISIBILITY_HIDDEN_TEXT no, OPEN_SHADOW_TEXT no, IFRAME_SAME_ORIGIN no, CANVAS_ONLY_TEXT no, BELOW_THE_FOLD yes.
 - Read text: `VISIBLE_ON_SCREEN`, blank, `OVERFLOW_SCROLLED_AWAY`, blank, `OVERFLOW_BOTTOM_VISIBLE`, blank, a whitespace line, blank, `BELOW_THE_FOLD`, then the `LAYOUT` lines listed in the table notes. `frame.html` was served 200. Favicon 404 is unused.
-- Worked: `uv run scripts/check.py` (exit 0).
-- Worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed).
-- Failed once, then worked: runtime pytest. The first run failed `test_browser_runtime[chromium]` because Playwright Chromium was not in `~/.cache/ms-playwright`. `uv run --project runtimes/browser playwright install chromium` installed Chrome for Testing 153.0.8010.12. Re-run: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (12 passed in 22.51s).
+- Worked, before the Part A commit: `uv run scripts/check.py` (exit 0). `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed). Runtime pytest failed once on `test_browser_runtime[chromium]` because Playwright Chromium was not cached. `uv run --project runtimes/browser playwright install chromium` installed Chrome for Testing 153.0.8010.12. Re-run: 12 passed in 22.51s.
+- Worked, after read 2.0.0: `uv run scripts/check.py` (exit 0). Catalog pytest 11 passed. `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (14 passed in 27.63s). The new tests are `test_viewport_offsets` and `test_read_viewports_scroll_and_restore`.
+- Worked: `uv run --project runtimes/browser python /tmp/measure_vision.py`. Read returned `page_height` 2793, `viewport_height` 800, `truncated` false, four viewports at `scroll_y` 0, 800, 1600, 1993. Content block types were text, then text/image pairs. Labels were `viewport N of 4, scroll_y ...`. Image mime type `image/png`. The four PNGs were inspected for the vision column.
 
 Next action:
-- Commit Part A, then implement `browser.read` 2.0.0.
+- Commit Part B, then add the POSIX container launcher (Part C).
 
 Unresolved (non-blocking):
 - This machine has no docker or podman, so the image build is proven by the CI job, not a local build.
