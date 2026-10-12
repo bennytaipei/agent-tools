@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>read visibility</title>
+<style>
+  html, body { margin: 0; font: 16px/1.4 sans-serif; }
+  #overflow {
+    height: 80px;
+    width: 320px;
+    overflow: auto;
+    border: 1px solid #000;
+  }
+  #overflow-inner { height: 360px; }
+  .is-display-none { display: none; }
+  .is-visibility-hidden { visibility: hidden; }
+  #below-spacer { height: 2000px; }
+  #layout { white-space: pre; }
+</style>
+</head>
+<body>
+  <p id="visible">VISIBLE_ON_SCREEN</p>
+  <div id="overflow">
+    <div id="overflow-inner">
+      <p id="overflow-away">OVERFLOW_SCROLLED_AWAY</p>
+      <p id="overflow-bottom">OVERFLOW_BOTTOM_VISIBLE</p>
+    </div>
+  </div>
+  <p class="is-display-none">DISPLAY_NONE_TEXT</p>
+  <p class="is-visibility-hidden">VISIBILITY_HIDDEN_TEXT</p>
+  <div id="shadow-host"></div>
+  <iframe id="frame" src="frame.html" title="same origin frame" width="320" height="80"></iframe>
+  <canvas id="canvas" width="420" height="48"></canvas>
+  <div id="below-spacer"></div>
+  <p id="below">BELOW_THE_FOLD</p>
+  <pre id="layout"></pre>
+  <script>
+    var box = document.getElementById("overflow");
+    var away = document.getElementById("overflow-away");
+    var bottom = document.getElementById("overflow-bottom");
+    bottom.style.marginTop = "300px";
+    box.scrollTop = box.scrollHeight;
+
+    var host = document.getElementById("shadow-host");
+    var root = host.attachShadow({mode: "open"});
+    var shadowText = document.createElement("p");
+    shadowText.id = "shadow-text";
+    shadowText.textContent = "OPEN_SHADOW" + "_TEXT";
+    root.appendChild(shadowText);
+
+    var canvas = document.getElementById("canvas");
+    var ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.font = "32px sans-serif";
+    ctx.fillStyle = "#000000";
+    ctx.fillText("CANVAS_ONLY" + "_TEXT", 4, 34);
+
+    function inViewport(el) {
+      var rect = el.getBoundingClientRect();
+      var viewH = window.innerHeight;
+      var viewW = window.innerWidth;
+      var shown = rect.bottom > 0 && rect.top < viewH && rect.right > 0 && rect.left < viewW;
+      return shown && rect.height > 0 && rect.width > 0;
+    }
+    function inBox(el) {
+      var rect = el.getBoundingClientRect();
+      var boxRect = box.getBoundingClientRect();
+      return rect.bottom > boxRect.top && rect.top < boxRect.bottom && rect.height > 0;
+    }
+    var below = document.getElementById("below");
+    var frame = document.getElementById("frame");
+    var lines = [
+      "LAYOUT viewport_height=" + window.innerHeight,
+      "LAYOUT viewport_width=" + window.innerWidth,
+      "LAYOUT below_top=" + Math.round(below.getBoundingClientRect().top),
+      "LAYOUT below_in_viewport=" + inViewport(below),
+      "LAYOUT visible_in_viewport=" + inViewport(document.getElementById("visible")),
+      "LAYOUT overflow_scroll_top=" + Math.round(box.scrollTop),
+      "LAYOUT overflow_client_height=" + box.clientHeight,
+      "LAYOUT overflow_scroll_height=" + box.scrollHeight,
+      "LAYOUT overflow_away_in_box=" + inBox(away),
+      "LAYOUT overflow_bottom_in_box=" + inBox(bottom),
+      "LAYOUT display=" + getComputedStyle(document.querySelector(".is-display-none")).display,
+      "LAYOUT visibility=" + getComputedStyle(document.querySelector(".is-visibility-hidden")).visibility,
+      "LAYOUT shadow_in_viewport=" + inViewport(host),
+      "LAYOUT shadow_mode=open",
+      "LAYOUT iframe_in_viewport=" + inViewport(frame),
+      "LAYOUT iframe_src=" + frame.getAttribute("src"),
+      "LAYOUT canvas_in_viewport=" + inViewport(canvas),
+      "LAYOUT canvas_pixels=filled"
+    ];
+    document.getElementById("layout").textContent = lines.join("\n");
+  </script>
+</body>
+</html>

@@ -1,66 +1,70 @@
 # Checkpoint
 
 Objective:
-Make the browser runtime deployable as a container on Benny's Mac (Apple Silicon, macOS, Podman with a linux/arm64 VM). The MCP harness launches it with `podman run -i` over stdio. The handoff page and noVNC are reachable from the Mac's browser at 127.0.0.1. Handoff notifies Benny with a macOS notification that opens the handoff page. Commit on main. Do not push.
+Make `browser.read` vision-first, and make the browser container launcher work with both Docker and Podman. Commit on main. Do not push. The outer agent verifies, then pushes.
 
-The deploy bug is fixed in the same tree: the runtime exposes MCP tool names as the tool segment only (`navigate`, `read`, `screenshot`, `handoff`). Catalog names stay fully qualified. That fix is committed on main and not pushed.
+Part A measures the current `browser.read` (`page.inner_text("body")`) on a fixture page before any read change. Part B replaces that output with viewport screenshots (`browser.read` 2.0.0). Part C adds a POSIX sh launcher the harness runs instead of a raw podman command.
 
 Frozen acceptance (one row per criterion):
-1. Browser choice is configurable by env var. The default stays system Chrome (channel chrome), so current box behavior is unchanged. A documented env var selects Playwright's bundled Chromium, which works on linux/arm64 where Google Chrome does not exist. The behavior tests pass with both settings on this machine.
-2. Ports and URL host are configurable by env var: a fixed handoff page port, a fixed noVNC/websockify port, a bind address (0.0.0.0 inside a container), and the public host used in the URL posted to the webhook (default 127.0.0.1). When unset, the current free-port behavior is unchanged. A test covers fixed ports, and asserts that the posted url uses the configured public host and port.
-3. runtimes/browser/Containerfile builds a multi-arch-safe image (it must build on linux/arm64 and linux/amd64). It contains Xvfb, x11vnc, websockify, noVNC, uv, the runtime, and Playwright Chromium with its OS deps. It uses the Chromium setting from row 1. It runs as a non-root user. The entrypoint is the MCP stdio server. The profile directory is a volume path. No secrets are baked in.
-4. If podman or docker is available on this machine, build the image here (amd64). Prove it with a scripted smoke test that runs it with `-i`, sends MCP initialize plus tools/list over stdio, and gets the four browser tools back, then calls browser.navigate on a page served from the host and gets the URL back. If no container engine is available here, say so in research-progress.md and keep the script for the Mac.
-5. runtimes/browser/contrib/macos_notify.py is a stdlib-only HTTP listener bound to 127.0.0.1 on a configurable port. On POST of {reason, url, expires_at}, it shows a macOS notification (osascript) with the reason and opens url in the default browser (`open`), then returns 204. Unit-test the request handling with the osascript and open calls stubbed. No macOS needed for the test.
-6. runtimes/browser/contrib/ has a launchd plist template for that listener, plus a doc section in runtimes/browser/README.md titled "Run on a Mac with Podman". It covers building the image, the exact `podman run -i --rm` command for MCP registration (published 127.0.0.1 ports, the named profile volume, and the webhook pointing at host.containers.internal), installing the listener, and registering with Grok Build, Claude Code, and OMP. Env vars appear by name. No secret values.
-7. All existing checks and tests still pass: `uv run scripts/check.py`, the catalog pytest, and the runtime behavior tests. Catalog manifests change only if a real contract gap appears, with a version bump per the README.
-8. This machine is shared and heavily loaded. Never kill processes you did not start. Clean up every process and container your tests start.
+A. Before changing read, a fixture page and a real run record what current `browser.read` returns for text below the fold, text in an `overflow: auto` container scrolled out of view, `display: none` text, `visibility: hidden` text, text in an open shadow root, text in a same-origin iframe, and text drawn only on a canvas. The table lists the case, whether it was returned, and the evidence.
+1. `browser.read` is 2.0.0. It scrolls from the top one viewport at a time and captures a PNG of each viewport, up to `max_viewports` (optional integer, default 10, min 1, max 30). Outputs are `url`, `page_height`, `viewport_height`, `truncated` (true when the page is longer than the captured viewports), and `viewports` (`index`, `scroll_y`, base64 PNG `image`). No DOM text. A page whose scrolling element is not the document scrolls the main scrollable element. The original scroll position is restored. `side_effects` says the call scrolls the page temporarily and restores it.
+2. The MCP result for read returns each viewport as an image content block (`type` image, `mimeType` `image/png`), in order. Each image is preceded by a short text block such as `viewport 2 of 5, scroll_y 1600`. `structuredContent` matches the outputs schema.
+3. `browser.screenshot` keeps its 1.0.0 contract. Its MCP result also includes an image content block. The manifest version becomes 1.1.0 only if the manifest text changes.
+4. `when_to_use` for read tells the agent this is how to read a page: look at the images like a human, and ask for more viewports if `truncated` is true.
+5. Local behavior tests: a long page yields several viewports with increasing `scroll_y`, `truncated` is true when capped, every image decodes to PNG, the scroll position is restored, and the MCP result has image blocks in order. Literal values are asserted where possible.
+6. `runtimes/browser/bin/agent-tools-browser` is a POSIX sh launcher. It picks `AGENT_TOOLS_CONTAINER_ENGINE` when set (`docker` or `podman`), else `docker` when `docker` is on PATH and `docker info` works, else `podman`. A Mac with only Podman (docker missing, or docker as Podman's compat shim) works.
+7. Podman uses the profile volume option `:U` and the host alias `host.containers.internal`. Docker omits `:U`, uses `host.docker.internal`, and on Linux adds `--add-host=host.docker.internal:host-gateway`. The webhook URL is built from `AGENT_TOOLS_NOTIFY_PORT` (default 8767) and the engine host alias, unless `AGENT_TOOLS_NOTIFY_WEBHOOK` is set. Ports come from `AGENT_TOOLS_HANDOFF_PORT` and `AGENT_TOOLS_NOVNC_PORT` (defaults 8765 and 8766). The image comes from `AGENT_TOOLS_IMAGE` (default `agent-tools-browser`). The launcher execs the engine with `run -i --rm`.
+8. `--build` builds the image with the chosen engine from the repo root.
+9. `smoke_container.py` uses the launcher and accepts `--engine docker|podman`.
+10. CI adds an ubuntu-latest job that builds the image with docker and runs the smoke test with `--engine docker`. The existing catalog job stays.
+11. `runtimes/browser/README.md` registers the launcher by absolute path for Grok Build, Claude Code, and OMP. Env vars appear by name only. Launcher engine choice and argument building are unit-tested with stubbed `docker` and `podman` on PATH.
+12. `uv run scripts/check.py`, the catalog pytest, and the runtime tests pass. Manifest versions follow the README rules.
+13. This machine is shared and loaded. Processes this task did not start are left alone. Everything this task starts is cleaned up.
+
+Human-visible in the Part A table means visible in the initial 800x1280 viewport without scrolling the page or the overflow box. The fixture records that itself (`LAYOUT` lines in the read text). Viewport height was 800. `below_top` was 2336.
+
+| case | expected human-visible? | returned by read? | notes |
+| --- | --- | --- | --- |
+| below the fold (`BELOW_THE_FOLD`) | no | yes | `below_in_viewport=false`, `below_top=2336`. `inner_text` still returned the paragraph. |
+| overflow box, scrolled out (`OVERFLOW_SCROLLED_AWAY`) | no | yes | `overflow_away_in_box=false`, `overflow_scroll_top=296`, client height 80, scroll height 376. The string was in the read text. |
+| overflow box, in view (`OVERFLOW_BOTTOM_VISIBLE`) | yes | yes | `overflow_bottom_in_box=true`. Control for the box. |
+| `display: none` (`DISPLAY_NONE_TEXT`) | no | no | `display=none`. Marker absent from the read text. |
+| `visibility: hidden` (`VISIBILITY_HIDDEN_TEXT`) | no | no | `visibility=hidden`. Marker absent from the read text. |
+| open shadow root (`OPEN_SHADOW_TEXT`) | yes | no | `shadow_in_viewport=true`, `shadow_mode=open`. Marker absent. `inner_text` does not enter the shadow tree. |
+| same-origin iframe (`IFRAME_SAME_ORIGIN`) | yes | no | `iframe_in_viewport=true`, `iframe_src=frame.html`. The child document was fetched (HTTP 200). Marker absent. |
+| canvas (`CANVAS_ONLY_TEXT`) | yes | no | `canvas_in_viewport=true`, `canvas_pixels=filled`. Marker absent. The glyphs are pixels. |
+| on-screen control (`VISIBLE_ON_SCREEN`) | yes | yes | `visible_in_viewport=true`. |
 
 Current state:
-- MCP names the runtime exposes are `navigate`, `read`, `screenshot`, and `handoff`. Catalog names stay `browser.*`. check.py, catalog pytest, and the runtime tests passed for this fix. This checkpoint is part of that commit. Not pushed.
-- The eight container rows above are done on main. Not pushed. The commit before this fix is 49109bf (Containerfile base image tag).
-- Displays after the runtime tests are still X1, X10, X13, X16, and X3. No Chrome, Xvfb, x11vnc, or websockify process from this run remains.
-- Row 1: `AGENT_TOOLS_BROWSER_CHANNEL` unset or `chrome` keeps system Chrome. `chromium` uses Playwright's bundled Chromium. The behavior suite passed for both in one pytest run.
-- Row 2: `AGENT_TOOLS_HANDOFF_PORT`, `AGENT_TOOLS_NOVNC_PORT`, `AGENT_TOOLS_BIND_ADDRESS`, and `AGENT_TOOLS_PUBLIC_HOST`. Unset keeps free ports on 127.0.0.1. `test_fixed_ports_and_public_host` passed with bind `0.0.0.0`, public host `browser.example`, and fixed ports. The posted URL used that host and the handoff port.
-- Row 3: `runtimes/browser/Containerfile` is in the tree. It was not built on this machine (see row 4).
-- Row 4: podman and docker are not on PATH. `runtimes/browser/contrib/smoke_container.py` is kept for the Mac. Running it here printed `no container engine available; smoke test not run` and exited 2. The image was not built here.
-- Row 5: listener and `test_macos_notify.py` passed with osascript and open stubbed.
-- Row 6: plist `runtimes/browser/contrib/com.agent-tools.browser-notify.plist` and README section "Run on a Mac with Podman".
-- Row 7: catalog manifests unchanged for the container work. check.py exit 0. Catalog pytest 11 passed. Runtime pytest 11 passed. The MCP name fix later re-ran the same commands: check.py exit 0, catalog pytest 11 passed, runtime pytest 12 passed.
-- Row 8: displays after the tests are still X1, X10, X13, X16, and X3. No Xvfb, x11vnc, websockify, or Chrome process from this runtime remains. No container was started.
-- Commits on main, not pushed, before this fix: 8bd9924, a9a6eb7, 0267b86, ab35e42, and 49109bf.
+- On main at 2167ef1. Not pushed by this session.
+- Row A measurement is done. Read implementation is still `inner_text("body")`. Fixture: `tests/fixtures/browser_read/read_visibility.html` and `frame.html`. Evidence: one MCP `navigate` + `read` on that page. The read JSON is quoted in Commands below.
+- Displays before the measurement: X1, X2, X10, X13. The measurement used Xvfb :200 and that display is gone. Those four displays remain. No Chrome from this task remains.
+- No container engine is on PATH (`docker` and `podman` are absent). The image will not be built on this machine. CI row 10 is the docker build.
+- Vision-read column is not in the table yet. Part B adds it after the new read lands.
 
 Decisions:
-- `AGENT_TOOLS_BROWSER_CHANNEL`: unset or `chrome` keeps system Chrome (`channel=chrome`, executable `/usr/bin/google-chrome`). `chromium` launches Playwright's bundled Chromium with no channel and no executable path. The image sets `chromium`.
-- `AGENT_TOOLS_HANDOFF_PORT` and `AGENT_TOOLS_NOVNC_PORT`: unset keeps a free port. A set value is the listen port. x11vnc stays on a free localhost port.
-- `AGENT_TOOLS_BIND_ADDRESS`: unset is `127.0.0.1`. The image sets `0.0.0.0`. `AGENT_TOOLS_PUBLIC_HOST`: unset is `127.0.0.1`. The posted URL and the page's noVNC iframe use the public host, because Benny's browser on the Mac loads them.
-- Image defaults: handoff port 8765, noVNC port 8766, profile `/var/lib/agent-tools/profile`, user `agent` (uid 1000). No webhook is baked in. The entrypoint is the venv Python MCP server. uv 0.12.21 is copied from the multi-arch uv image.
-- The Mac listener binds `127.0.0.1` and reads `AGENT_TOOLS_MACOS_NOTIFY_PORT` (default 8767). The container webhook in the runbook is `http://host.containers.internal:8767/`.
-- OMP registration is `~/.omp/agent/mcp.json` (project file `.omp/mcp.json` uses the same shape). Grok Build is `~/.grok/config.toml`. Claude Code is a user-scoped stdio server.
-- Catalog manifests stay at their current versions. No contract gap turned up.
-- MCP tool names the runtime exposes are the tool segment only: `navigate`, `read`, `screenshot`, and `handoff`. `mcp_tool_name` in `runtimes/browser/agent_tools_browser/catalog.py` is the one place that derives that name from the manifest name (`browser.navigate` and the rest stay fully qualified). The harness server name `browser` is the namespace. Grok Build and Claude Code reject a dot in a tool name. Dispatch still switches on the qualified catalog name. `smoke_container.py` lists and calls those exposed names. Frozen row 4 above says the smoke test "calls browser.navigate"; that sentence describes the pre-fix script.
-
-Done earlier:
-- Browser reference runtime on main at 63ce837. Manifests at 1.0.0. Headed system Chrome on a private Xvfb display, handoff via x11vnc, websockify, and `/usr/share/novnc`, webhook `AGENT_TOOLS_NOTIFY_WEBHOOK`. Behavior tests cover navigate, read, screenshot, handoff done/cancelled/timeout, and notify_failed. CI runs the catalog check only, because ubuntu-latest lacks the display stack.
-- Manifest contract locked and four browser tools migrated. Draft teams.send_message at 0.1.0. Those commits are on main through ebf7959.
+- Measure with the existing MCP `read` tool against a local fixture before editing `session.read`.
+- `browser.read` goes to 2.0.0 because the outputs change. `browser.screenshot` stays 1.0.0 unless its manifest text has to change. An image block on the screenshot MCP result is not a manifest change.
+- Avoid the word "should" in manifests.
+- Human-visible means painted in the initial viewport. Below-fold text and overflow-clipped text are not human-visible on that screen even though a person could scroll to them.
+- When the document scrolls, vision read scrolls the document. The small overflow box is not the main scroller on this fixture, so `OVERFLOW_SCROLLED_AWAY` is expected to stay out of the screenshots. A separate page whose only scroller is an element tests the non-document path.
+- MCP read content is the JSON text block, then for each viewport a short text label and an image block. Screenshot content is the JSON text block plus one image block.
+- Launcher treats a `docker` binary whose `--version` or `info` output contains `podman` as Podman. Explicit `AGENT_TOOLS_CONTAINER_ENGINE` still selects that engine's flag style.
 
 Files changed:
-- This fix: research-progress.md, runtimes/browser/README.md, runtimes/browser/agent_tools_browser/catalog.py, runtimes/browser/agent_tools_browser/server.py, runtimes/browser/contrib/smoke_container.py, runtimes/browser/tests/test_runtime.py.
-- Container files through 49109bf are already on main: .dockerignore, .github/workflows/check.yml, runtimes/browser/Containerfile, handoff.py, processes.py, session.py, the launchd plist, macos_notify.py, and test_macos_notify.py.
+- `tests/fixtures/browser_read/read_visibility.html`
+- `tests/fixtures/browser_read/frame.html`
+- `research-progress.md`
 
 Commands that worked / failed:
-- Worked: `uv run --project runtimes/browser playwright install chromium` (Chrome for Testing 153.0.8010.12 at ~/.cache/ms-playwright/chromium-1243).
+- Worked: `uv run --project runtimes/browser python /tmp/measure_read.py`. Navigate returned the fixture URL. Read returned `inner_text` JSON. Marker membership: VISIBLE_ON_SCREEN yes, OVERFLOW_SCROLLED_AWAY yes, OVERFLOW_BOTTOM_VISIBLE yes, DISPLAY_NONE_TEXT no, VISIBILITY_HIDDEN_TEXT no, OPEN_SHADOW_TEXT no, IFRAME_SAME_ORIGIN no, CANVAS_ONLY_TEXT no, BELOW_THE_FOLD yes.
+- Read text: `VISIBLE_ON_SCREEN`, blank, `OVERFLOW_SCROLLED_AWAY`, blank, `OVERFLOW_BOTTOM_VISIBLE`, blank, a whitespace line, blank, `BELOW_THE_FOLD`, then the `LAYOUT` lines listed in the table notes. `frame.html` was served 200. Favicon 404 is unused.
 - Worked: `uv run scripts/check.py` (exit 0).
-- Worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed in 1.26s).
-- Worked: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (11 passed in 23.46s). That run covered default Chrome, bundled Chromium, fixed ports with public host `browser.example`, and the macOS listener stubs.
-- Recorded: `uv run --project runtimes/browser python runtimes/browser/contrib/smoke_container.py` printed `no container engine available; smoke test not run` and exited 2. `command -v podman` and `command -v docker` printed nothing, so the image was not built here.
-- Worked after the MCP name fix: `uv run scripts/check.py` (exit 0).
-- Worked after the MCP name fix: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed in 1.18s).
-- Worked after the MCP name fix: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (12 passed in 20.92s). The new test checks the four exposed names and the admission pattern.
+- Worked: `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed).
+- Failed once, then worked: runtime pytest. The first run failed `test_browser_runtime[chromium]` because Playwright Chromium was not in `~/.cache/ms-playwright`. `uv run --project runtimes/browser playwright install chromium` installed Chrome for Testing 153.0.8010.12. Re-run: `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (12 passed in 22.51s).
 
 Next action:
-- None for this fix. Committed on main. Not pushed. The outer agent verifies and pushes.
-- Human gate: rebuild the image on the Mac with Podman and run the smoke script, then a live handoff where Benny logs in through the published noVNC page. Register the server as `browser`. The tools are `navigate`, `read`, `screenshot`, and `handoff`.
+- Commit Part A, then implement `browser.read` 2.0.0.
 
 Unresolved (non-blocking):
-- The Containerfile has not been built on this machine. The Mac smoke script is the build proof. An image built before this fix still advertises dotted tool names and will be skipped by Grok Build and Claude Code until it is rebuilt.
-- Podman on macOS reaches the Mac via host.containers.internal. The listener binds 127.0.0.1, as specified.
+- This machine has no docker or podman, so the image build is proven by the CI job, not a local build.
