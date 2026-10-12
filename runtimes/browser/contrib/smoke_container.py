@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
 """Smoke-test the browser runtime container over MCP stdio.
 
-Uses podman when it is on PATH, otherwise docker. Builds the image, runs it
-with -i, sends MCP initialize and tools/list, and calls navigate
-against a page served on the host.
+Uses runtimes/browser/bin/agent-tools-browser --build. --engine docker or
+--engine podman selects the engine. With no --engine, the choice matches the
+launcher: docker when `docker info` succeeds, otherwise podman. A docker
+binary that reports podman is the Podman compat shim.
 
-Exit 0 when the smoke test passes. Exit 2 when neither engine is on PATH.
+Exit 0 when the smoke test passes. Exit 2 when the engine is not available.
 Exit 1 when the build or the protocol check fails.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
-import tempfile
 import threading
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -26,6 +29,7 @@ from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 
 REPO = Path(__file__).resolve().parents[3]
+LAUNCHER = REPO / "runtimes" / "browser" / "bin" / "agent-tools-browser"
 IMAGE = "agent-tools-browser:smoke"
 TOOLS = (
     "navigate",
@@ -35,77 +39,111 @@ TOOLS = (
 )
 
 
-def engine_name() -> str | None:
-    for name in ("podman", "docker"):
-        if shutil.which(name):
-            return name
-    return None
+@dataclass(frozen=True)
+class EnginePlan:
+    """How the launcher will run, so the smoke URL uses the same host alias."""
+
+    command: str
+    style: str
+    alias: str
 
 
-def main() -> int:
-    engine = engine_name()
-    if engine is None:
-        print("no container engine available; smoke test not run", file=sys.stderr)
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Smoke-test the browser container.")
+    parser.add_argument("--engine", choices=("docker", "podman"))
+    args = parser.parse_args(argv)
+    plan = engine_plan(args.engine)
+    if plan is None:
+        if args.engine:
+            print(f"{args.engine} is not on PATH; smoke test not run", file=sys.stderr)
+        else:
+            print("no container engine available; smoke test not run", file=sys.stderr)
         return 2
-    name = f"agent-tools-browser-smoke-{os.getpid()}"
-    profile_dir = tempfile.TemporaryDirectory(prefix="agent-tools-browser-profile-")
+    volume = f"agent-tools-browser-smoke-{os.getpid()}"
+    handoff, novnc = _two_free_ports()
     site = _start_site()
     try:
-        _build(engine)
-        host_port = site.server_address[1]
-        alias = "host.containers.internal" if engine == "podman" else "host.docker.internal"
-        url = f"http://{alias}:{host_port}/landed"
-        args = _run_args(engine, name, Path(profile_dir.name), alias)
-        asyncio.run(_exercise(engine, args, url))
+        url = f"http://{plan.alias}:{site.server_address[1]}/landed"
+        env = os.environ.copy()
+        if args.engine:
+            env["AGENT_TOOLS_CONTAINER_ENGINE"] = plan.command
+        env["AGENT_TOOLS_IMAGE"] = IMAGE
+        env["AGENT_TOOLS_PROFILE_VOLUME"] = volume
+        env["AGENT_TOOLS_HANDOFF_PORT"] = str(handoff)
+        env["AGENT_TOOLS_NOVNC_PORT"] = str(novnc)
+        env["AGENT_TOOLS_NOTIFY_WEBHOOK"] = "http://127.0.0.1:9/unused"
+        asyncio.run(_exercise(env, url))
     finally:
         site.shutdown()
         site.server_close()
-        subprocess.run(
-            [engine, "rm", "-f", name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        profile_dir.cleanup()
+        _cleanup(plan.command, volume)
     print("smoke test passed")
     return 0
 
 
-def _build(engine: str) -> None:
-    subprocess.run(
-        [engine, "build", "-f", "runtimes/browser/Containerfile", "-t", IMAGE, "."],
-        cwd=REPO,
-        check=True,
+def engine_plan(requested: str | None) -> EnginePlan | None:
+    """Match runtimes/browser/bin/agent-tools-browser engine choice."""
+
+    if requested == "podman":
+        if shutil.which("podman") is None:
+            return None
+        return EnginePlan("podman", "podman", "host.containers.internal")
+    if requested == "docker":
+        if shutil.which("docker") is None:
+            return None
+        return EnginePlan("docker", "docker", "host.docker.internal")
+    if shutil.which("docker") and _docker_info_ok():
+        if _docker_is_podman_shim():
+            if shutil.which("podman"):
+                return EnginePlan("podman", "podman", "host.containers.internal")
+            return EnginePlan("docker", "podman", "host.containers.internal")
+        return EnginePlan("docker", "docker", "host.docker.internal")
+    if shutil.which("podman"):
+        return EnginePlan("podman", "podman", "host.containers.internal")
+    return None
+
+
+def _docker_info_ok() -> bool:
+    result = subprocess.run(
+        ["docker", "info"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
     )
+    return result.returncode == 0
 
 
-def _run_args(engine: str, name: str, profile: Path, alias: str) -> list[str]:
-    profile.mkdir(parents=True, exist_ok=True)
-    os.chmod(profile, 0o777)
-    volume = f"{profile}:/var/lib/agent-tools/profile"
-    if engine == "podman":
-        volume += ":U"
-    args = [
-        "run",
-        "-i",
-        "--rm",
-        "--name",
-        name,
-        "--add-host",
-        f"{alias}:host-gateway",
-        "-v",
-        volume,
-        "-e",
-        "AGENT_TOOLS_BROWSER_PROFILE=/var/lib/agent-tools/profile",
-        IMAGE,
-    ]
-    if engine == "docker":
-        # The image user is uid 1000. Match the host owner of the bind mount
-        # so the profile directory stays writable without a podman :U chown.
-        uid = str(os.getuid())
-        gid = str(os.getgid())
-        args[1:1] = ["--user", f"{uid}:{gid}", "-e", "HOME=/tmp"]
-    return args
+def _docker_is_podman_shim() -> bool:
+    version = subprocess.run(
+        ["docker", "--version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if "podman" in (version.stdout or "").lower():
+        return True
+    info = subprocess.run(
+        ["docker", "info"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    return "podman" in (info.stdout or "").lower()
+
+
+def _two_free_ports() -> tuple[int, int]:
+    sockets = []
+    ports: list[int] = []
+    for _ in range(2):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        ports.append(sock.getsockname()[1])
+        sockets.append(sock)
+    for sock in sockets:
+        sock.close()
+    return ports[0], ports[1]
 
 
 def _start_site() -> ThreadingHTTPServer:
@@ -128,9 +166,38 @@ def _start_site() -> ThreadingHTTPServer:
     return httpd
 
 
-async def _exercise(engine: str, args: list[str], url: str) -> None:
-    server = StdioServerParameters(command=engine, args=args, cwd=str(REPO))
-    async with Client(server, read_timeout_seconds=180) as client:
+def _cleanup(engine: str, volume: str) -> None:
+    listed = subprocess.run(
+        [engine, "ps", "-aq", "--filter", f"ancestor={IMAGE}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    ids = [line for line in listed.stdout.split() if line]
+    if ids:
+        subprocess.run(
+            [engine, "rm", "-f", *ids],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    subprocess.run(
+        [engine, "volume", "rm", "-f", volume],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+async def _exercise(env: dict[str, str], url: str) -> None:
+    server = StdioServerParameters(
+        command=str(LAUNCHER),
+        args=["--build"],
+        env=env,
+        cwd=str(REPO),
+    )
+    async with Client(server, read_timeout_seconds=300) as client:
         listed = await client.list_tools()
         names = [tool.name for tool in listed.tools]
         print("tools:", ", ".join(names))

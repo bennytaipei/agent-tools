@@ -38,11 +38,11 @@ Human-visible in the Part A table means visible in the initial 800x1280 viewport
 | on-screen control (`VISIBLE_ON_SCREEN`) | yes | yes | yes | `visible_in_viewport=true`. Viewport 0 shows it. |
 
 Current state:
-- Part A is committed as e4d1442. Not pushed.
-- `browser.read` 2.0.0 is implemented in the working tree: viewport screenshots, `max_viewports`, scroll restore, MCP image blocks for read and screenshot. Screenshot manifest stays 1.0.0.
-- The vision column in the table above is filled from the fixture re-run. Behavior tests cover a tall page (default cap 10, `max_viewports` 1 and 30), document scroll restore, and an inner overflow scroller.
+- Part A is e4d1442. Part B is 1672c70. Not pushed.
+- `browser.read` is 2.0.0. Screenshot stays 1.0.0. The vision column in the table above is filled.
+- The launcher is `runtimes/browser/bin/agent-tools-browser`. Smoke uses it and accepts `--engine`. CI job `smoke` runs that script with `--engine docker`.
 - Displays before this task: X1, X2, X10, X13. Runs used Xvfb :200 and that display is gone. Those four displays remain. No Chrome from this task remains.
-- No container engine is on PATH (`docker` and `podman` are absent). The image will not be built on this machine. CI row 10 is the docker build.
+- No container engine is on PATH (`docker` and `podman` are absent). The image was not built on this machine. The CI job is the build.
 
 Decisions:
 - Measure with the existing MCP `read` tool against a local fixture before editing `session.read`.
@@ -52,21 +52,41 @@ Decisions:
 - When the document scrolls, vision read scrolls the document. The small overflow box is not the main scroller on this fixture, so `OVERFLOW_SCROLLED_AWAY` is expected to stay out of the screenshots. A separate page whose only scroller is an element tests the non-document path.
 - MCP read content is the JSON text block, then for each viewport a short text label and an image block. Screenshot content is the JSON text block plus one image block.
 - Launcher treats a `docker` binary whose `--version` or `info` output contains `podman` as Podman. Explicit `AGENT_TOOLS_CONTAINER_ENGINE` still selects that engine's flag style.
+- Smoke uses a separate profile volume name (`AGENT_TOOLS_PROFILE_VOLUME`) so a smoke run does not write the real `agent-tools-browser-profile` volume.
 
 Files changed:
-- `tests/fixtures/browser_read/read_visibility.html`
-- `tests/fixtures/browser_read/frame.html`
-- `research-progress.md`
+- Part A: `tests/fixtures/browser_read/read_visibility.html`, `frame.html`, `research-progress.md`.
+- Part B: `catalog/browser/read.yaml`, `session.py`, `server.py`, `test_runtime.py`, `tests/test_check.py`.
+- Part C: `runtimes/browser/bin/agent-tools-browser`, `contrib/smoke_container.py`, `tests/test_browser_launcher.py`, `runtimes/browser/tests/test_smoke_engine.py`, `.github/workflows/check.yml`, `runtimes/browser/README.md`.
 
 Commands that worked / failed:
 - Worked: `uv run --project runtimes/browser python /tmp/measure_read.py`. Navigate returned the fixture URL. Read returned `inner_text` JSON. Marker membership: VISIBLE_ON_SCREEN yes, OVERFLOW_SCROLLED_AWAY yes, OVERFLOW_BOTTOM_VISIBLE yes, DISPLAY_NONE_TEXT no, VISIBILITY_HIDDEN_TEXT no, OPEN_SHADOW_TEXT no, IFRAME_SAME_ORIGIN no, CANVAS_ONLY_TEXT no, BELOW_THE_FOLD yes.
 - Read text: `VISIBLE_ON_SCREEN`, blank, `OVERFLOW_SCROLLED_AWAY`, blank, `OVERFLOW_BOTTOM_VISIBLE`, blank, a whitespace line, blank, `BELOW_THE_FOLD`, then the `LAYOUT` lines listed in the table notes. `frame.html` was served 200. Favicon 404 is unused.
 - Worked, before the Part A commit: `uv run scripts/check.py` (exit 0). `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (11 passed). Runtime pytest failed once on `test_browser_runtime[chromium]` because Playwright Chromium was not cached. `uv run --project runtimes/browser playwright install chromium` installed Chrome for Testing 153.0.8010.12. Re-run: 12 passed in 22.51s.
 - Worked, after read 2.0.0: `uv run scripts/check.py` (exit 0). Catalog pytest 11 passed. `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (14 passed in 27.63s). The new tests are `test_viewport_offsets` and `test_read_viewports_scroll_and_restore`.
-- Worked: `uv run --project runtimes/browser python /tmp/measure_vision.py`. Read returned `page_height` 2793, `viewport_height` 800, `truncated` false, four viewports at `scroll_y` 0, 800, 1600, 1993. Content block types were text, then text/image pairs. Labels were `viewport N of 4, scroll_y ...`. Image mime type `image/png`. The four PNGs were inspected for the vision column.
+- Worked: `uv run --project runtimes/browser python /tmp/measure_vision.py`. Read returned `page_height` 2793, `viewport_height` 800, `truncated` false, four viewports at `scroll_y` 0, 800, 1600, 1993. Content block types were text, then text/image pairs. Labels were `viewport N of 4, scroll_y ...`. Image mime type `image/png`. The four PNGs were inspected for the vision column. Viewport 0 shows `VISIBLE_ON_SCREEN`, `OVERFLOW_BOTTOM_VISIBLE`, `OPEN_SHADOW_TEXT`, `IFRAME_SAME_ORIGIN`, and `CANVAS_ONLY_TEXT`. It does not show `OVERFLOW_SCROLLED_AWAY`, `DISPLAY_NONE_TEXT`, or `VISIBILITY_HIDDEN_TEXT`. Viewports at `scroll_y` 1600 and 1993 show `BELOW_THE_FOLD`.
+- Worked, launcher stubs: `uv run --with pytest --with pyyaml --with jsonschema pytest -q tests/test_browser_launcher.py tests/test_check.py` (23 passed).
+- Worked, after the launcher and again before the Part C commit: `uv run scripts/check.py` (exit 0). `uv run --with pytest --with pyyaml --with jsonschema pytest -q` (23 passed). `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` (22 passed in 26.44s). That includes `test_smoke_engine.py`.
+- Not run: a real image build. `docker` and `podman` are not on PATH. `smoke_container.py` would exit 2 here. The workflow job is the build.
+
+Checked:
+- A. Fixture `tests/fixtures/browser_read/read_visibility.html` plus `frame.html`. Table above. Evidence is the `inner_text` run quoted in Commands.
+- 1. `catalog/browser/read.yaml` version `2.0.0`. `session.read` scrolls from the top, one viewport at a time, and restores. `test_read_viewports_scroll_and_restore` passed: a page taller than 10 viewports returns 10 with `truncated` true, `max_viewports` 30 returns every viewport with `truncated` false, and both the document and an inner overflow scroller restore a green mid-page pixel after the capture (first PNG red, last PNG blue).
+- 2. The same test asserts each image block is `type` image, `mime_type` `image/png`, preceded by `viewport N of M, scroll_y ...`, and `structuredContent` matches the manifest. The fixture re-run printed those labels.
+- 3. `catalog/browser/screenshot.yaml` is still `1.0.0` (manifest text unchanged). `test_browser_runtime` asserts the screenshot result has one image block whose bytes are the structured PNG.
+- 4. `when_to_use` on `browser.read` says to look at the screenshots the way a person looks at the screen, and to call again with a higher `max_viewports` when `truncated` is true.
+- 5. `test_viewport_offsets` and `test_read_viewports_scroll_and_restore` passed. Literal scroll offsets, the cap of 10, PNG bytes, and restored colors are asserted.
+- 6. `runtimes/browser/bin/agent-tools-browser` starts with `#!/bin/sh`. `sh -n` passed inside `test_launcher_is_posix_sh`. Stub tests cover explicit `docker` and `podman`, `docker info` failure, missing `docker`, and a Podman shim with and without a `podman` binary.
+- 7. Stub runs assert Podman `:U` and `host.containers.internal`, Docker without `:U`, `host.docker.internal`, and `--add-host=host.docker.internal:host-gateway` on Linux only. `AGENT_TOOLS_NOTIFY_WEBHOOK` overrides the URL built from `AGENT_TOOLS_NOTIFY_PORT`. Ports and `AGENT_TOOLS_IMAGE` are asserted.
+- 8. `test_build_flag_and_overrides` asserts `podman build -f <repo>/runtimes/browser/Containerfile -t <image> <repo>` before `run`.
+- 9. `smoke_container.py` calls the launcher with `--build` and accepts `--engine`. `test_smoke_engine.py` covers the flag, exit 2, and the same engine choice.
+- 10. `.github/workflows/check.yml` job `smoke` on `ubuntu-latest` runs `smoke_container.py --engine docker`. The `check` job is unchanged aside from a comment. This machine did not run that job.
+- 11. `runtimes/browser/README.md` registers `__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser` for Grok Build, Claude Code, and OMP. Env vars are named. Launcher stub tests passed.
+- 12. `uv run scripts/check.py` exit 0. Catalog pytest 23 passed. Runtime pytest 22 passed in 26.44s. `browser.read` is `2.0.0`. The other browser manifests stay `1.0.0`.
+- 13. Displays after the runs are X1, X2, X10, X13. No Chrome, Xvfb :200, or container from this task remains.
 
 Next action:
-- Commit Part B, then add the POSIX container launcher (Part C).
+- None. Parts A, B, and C are committed locally. Not pushed.
 
 Unresolved (non-blocking):
-- This machine has no docker or podman, so the image build is proven by the CI job, not a local build.
+- This machine has no docker or podman, so the image was not built here. The `smoke` GitHub Actions job is the build. It runs when the branch is pushed.

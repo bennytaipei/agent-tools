@@ -1,0 +1,109 @@
+#!/bin/sh
+# Launch the browser MCP server in Docker or Podman.
+# Stdio is the container's stdio. See runtimes/browser/README.md.
+set -eu
+
+BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=$(CDPATH= cd -- "$BASE/../../.." && pwd)
+
+if [ "$#" -gt 1 ]; then
+  echo "usage: agent-tools-browser [--build]" >&2
+  exit 2
+fi
+BUILD=0
+if [ "$#" -eq 1 ]; then
+  if [ "$1" != "--build" ]; then
+    echo "usage: agent-tools-browser [--build]" >&2
+    exit 2
+  fi
+  BUILD=1
+fi
+
+# A podman-docker shim answers `docker` but prints podman in its version or info.
+docker_is_podman_shim() {
+  out=$(docker --version 2>&1 || true)
+  case $out in
+    *[Pp]odman*) return 0 ;;
+  esac
+  out=$(docker info 2>&1 || true)
+  case $out in
+    *[Pp]odman*) return 0 ;;
+  esac
+  return 1
+}
+
+ENGINE=${AGENT_TOOLS_CONTAINER_ENGINE:-}
+if [ -n "$ENGINE" ]; then
+  base=$(basename -- "$ENGINE")
+  case $base in
+    podman|podman.exe) STYLE=podman ;;
+    *) STYLE=docker ;;
+  esac
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  if docker_is_podman_shim; then
+    if command -v podman >/dev/null 2>&1; then
+      ENGINE=podman
+    else
+      ENGINE=docker
+    fi
+    STYLE=podman
+  else
+    ENGINE=docker
+    STYLE=docker
+  fi
+else
+  ENGINE=podman
+  STYLE=podman
+fi
+
+IMAGE=${AGENT_TOOLS_IMAGE:-agent-tools-browser}
+HANDOFF=${AGENT_TOOLS_HANDOFF_PORT:-8765}
+NOVNC=${AGENT_TOOLS_NOVNC_PORT:-8766}
+NOTIFY=${AGENT_TOOLS_NOTIFY_PORT:-8767}
+BIND=${AGENT_TOOLS_BIND_ADDRESS:-0.0.0.0}
+PUBLIC=${AGENT_TOOLS_PUBLIC_HOST:-127.0.0.1}
+CHANNEL=${AGENT_TOOLS_BROWSER_CHANNEL:-chromium}
+VOLUME_NAME=${AGENT_TOOLS_PROFILE_VOLUME:-agent-tools-browser-profile}
+PROFILE_PATH=/var/lib/agent-tools/profile
+
+if [ "$STYLE" = "podman" ]; then
+  ALIAS=host.containers.internal
+  VOLUME="${VOLUME_NAME}:${PROFILE_PATH}:U"
+else
+  ALIAS=host.docker.internal
+  VOLUME="${VOLUME_NAME}:${PROFILE_PATH}"
+fi
+
+if [ -n "${AGENT_TOOLS_NOTIFY_WEBHOOK:-}" ]; then
+  WEBHOOK=$AGENT_TOOLS_NOTIFY_WEBHOOK
+else
+  WEBHOOK="http://${ALIAS}:${NOTIFY}/"
+fi
+
+if [ "$BUILD" -eq 1 ]; then
+  "$ENGINE" build -f "$ROOT/runtimes/browser/Containerfile" -t "$IMAGE" "$ROOT"
+fi
+
+set -- run -i --rm \
+  -p "127.0.0.1:${HANDOFF}:${HANDOFF}" \
+  -p "127.0.0.1:${NOVNC}:${NOVNC}"
+
+if [ "$STYLE" = "docker" ]; then
+  uname_s=$(uname -s)
+  if [ "$uname_s" = "Linux" ]; then
+    set -- "$@" --add-host=host.docker.internal:host-gateway
+  fi
+fi
+
+set -- "$@" \
+  -v "$VOLUME" \
+  -e "AGENT_TOOLS_NOTIFY_WEBHOOK=${WEBHOOK}" \
+  -e "AGENT_TOOLS_BROWSER_CHANNEL=${CHANNEL}" \
+  -e "AGENT_TOOLS_BIND_ADDRESS=${BIND}" \
+  -e "AGENT_TOOLS_PUBLIC_HOST=${PUBLIC}" \
+  -e "AGENT_TOOLS_HANDOFF_PORT=${HANDOFF}" \
+  -e "AGENT_TOOLS_NOVNC_PORT=${NOVNC}" \
+  -e "AGENT_TOOLS_BROWSER_PROFILE=${PROFILE_PATH}" \
+  "$IMAGE"
+
+exec "$ENGINE" "$@"

@@ -14,6 +14,8 @@ uv run --project runtimes/browser python -m agent_tools_browser
 
 The default browser is the system binary `/usr/bin/google-chrome` (Playwright channel `chrome`). The process starts Xvfb on a free display and does not attach to a display that is already in use. `x11vnc` and `websockify` start only during `handoff`, use a free port, and stop when the call returns. websockify serves the bundled noVNC files at `/usr/share/novnc`.
 
+To run that server inside a container, register `runtimes/browser/bin/agent-tools-browser` instead of this command. The section below is that launcher.
+
 ## Environment
 
 Set these in the server process. The repo never stores their values.
@@ -47,42 +49,48 @@ Add `AGENT_TOOLS_BROWSER_PROFILE` and `AGENT_TOOLS_NOTIFY_WEBHOOK` to that serve
 
 The MCP tool names are `navigate`, `read`, `screenshot`, and `handoff`. Each one is the tool segment of the catalog manifest name (`browser.navigate` and the rest stay fully qualified in `catalog/browser/`). Register this server as `browser` so that server name is the namespace. Grok Build and Claude Code admit only letters, digits, underscores, and hyphens in a tool name. Inputs that fail the manifest schema, and results that fail it, come back as that tool's declared error codes.
 
-## Run on a Mac with Podman
+## Run in a container
 
-Benny's Mac is Apple Silicon. Podman runs this image in a linux/arm64 virtual machine. The harness starts one container with `podman run -i` and speaks MCP on that stdin and stdout. The handoff page and noVNC are published on `127.0.0.1`, so the Mac's own browser can open them. A listener on the Mac receives the handoff POST, posts a notification, and opens the page.
+`runtimes/browser/bin/agent-tools-browser` is the stdio command to register. It is POSIX sh. It chooses an engine, then execs that engine with `run -i --rm`. The harness speaks MCP on the container's stdin and stdout. The handoff page and noVNC are published on `127.0.0.1`.
 
-### Build the image
+Benny's Mac is Apple Silicon. Podman runs the image in a linux/arm64 virtual machine. The same launcher uses Docker on Linux.
 
-From the repo root, on the Mac:
+### Engine
 
-```
-podman build -f runtimes/browser/Containerfile -t agent-tools-browser .
-```
+- `AGENT_TOOLS_CONTAINER_ENGINE` when it is set (`docker` or `podman`).
+- Otherwise `docker`, when `docker` is on `PATH` and `docker info` succeeds.
+- Otherwise `podman`.
+
+A `docker` binary whose `--version` or `info` text contains `podman` is Podman's compat shim. The launcher treats that shim as Podman. A Mac that has only Podman works, including when `docker` is that shim.
+
+Podman mounts the profile volume with `:U` and uses the host alias `host.containers.internal`. Docker omits `:U`, uses `host.docker.internal`, and on Linux adds `--add-host=host.docker.internal:host-gateway`.
+
+### Build
 
 `runtimes/browser/Containerfile` builds on linux/arm64 and linux/amd64. The image contains Xvfb, x11vnc, websockify, noVNC, uv, the runtime, and Playwright Chromium with its OS packages. It sets `AGENT_TOOLS_BROWSER_CHANNEL` to `chromium`. The entrypoint is the MCP stdio server. The process user is `agent` (uid 1000). The profile directory is the volume path `/var/lib/agent-tools/profile`. The image contains no webhook URL and no other secret.
 
-The same image build on linux/amd64 is what `runtimes/browser/contrib/smoke_container.py` runs when podman or docker is on PATH.
-
-### Podman command
-
-This is the stdio command to register. `-i` keeps stdin open for MCP. Ports are published only on `127.0.0.1`. `8765` is `AGENT_TOOLS_HANDOFF_PORT`. `8766` is `AGENT_TOOLS_NOVNC_PORT`. The named volume keeps the profile across runs, and `:U` makes it writable by the container user. The webhook is the listener below, reached from the container as `host.containers.internal`.
+From the repo root, `--build` runs that build with the chosen engine, then starts the container:
 
 ```
-podman run -i --rm \
-  -p 127.0.0.1:8765:8765 \
-  -p 127.0.0.1:8766:8766 \
-  -v agent-tools-browser-profile:/var/lib/agent-tools/profile:U \
-  -e AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.containers.internal:8767/ \
-  -e AGENT_TOOLS_BROWSER_CHANNEL=chromium \
-  -e AGENT_TOOLS_BIND_ADDRESS=0.0.0.0 \
-  -e AGENT_TOOLS_PUBLIC_HOST=127.0.0.1 \
-  -e AGENT_TOOLS_HANDOFF_PORT=8765 \
-  -e AGENT_TOOLS_NOVNC_PORT=8766 \
-  -e AGENT_TOOLS_BROWSER_PROFILE=/var/lib/agent-tools/profile \
-  agent-tools-browser
+runtimes/browser/bin/agent-tools-browser --build
 ```
 
-Change a published port only together with the matching `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT` value. `AGENT_TOOLS_PUBLIC_HOST` stays `127.0.0.1` so the page and the noVNC frame load in the Mac's browser.
+### Environment
+
+The launcher reads these names. Defaults are in parentheses. None of them is a secret.
+
+- `AGENT_TOOLS_CONTAINER_ENGINE` (unset: the choice above)
+- `AGENT_TOOLS_IMAGE` (`agent-tools-browser`)
+- `AGENT_TOOLS_PROFILE_VOLUME` (`agent-tools-browser-profile`)
+- `AGENT_TOOLS_HANDOFF_PORT` (`8765`)
+- `AGENT_TOOLS_NOVNC_PORT` (`8766`)
+- `AGENT_TOOLS_NOTIFY_PORT` (`8767`)
+- `AGENT_TOOLS_NOTIFY_WEBHOOK` (unset: `http://` plus the engine host alias, plus `AGENT_TOOLS_NOTIFY_PORT`)
+- `AGENT_TOOLS_BIND_ADDRESS` (`0.0.0.0`)
+- `AGENT_TOOLS_PUBLIC_HOST` (`127.0.0.1`)
+- `AGENT_TOOLS_BROWSER_CHANNEL` (`chromium`)
+
+`AGENT_TOOLS_PUBLIC_HOST` stays `127.0.0.1` so the page and the noVNC frame load in the browser on the machine in front of the container. Change a published port only by setting `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT`. The launcher publishes that same port on `127.0.0.1`.
 
 ### Install the listener
 
@@ -95,40 +103,26 @@ cp runtimes/browser/contrib/com.agent-tools.browser-notify.plist ~/Library/Launc
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agent-tools.browser-notify.plist
 ```
 
-`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.agent-tools.browser-notify.plist` stops it. The plist sets `AGENT_TOOLS_MACOS_NOTIFY_PORT` to `8767`, which is the port in the webhook URL above.
+`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.agent-tools.browser-notify.plist` stops it. The plist sets `AGENT_TOOLS_MACOS_NOTIFY_PORT` to `8767`, which is `AGENT_TOOLS_NOTIFY_PORT` on the launcher.
 
 ### Register with Grok Build
 
-In `~/.grok/config.toml`:
+Replace `__REPO_ROOT__` with the absolute path of this repo. In `~/.grok/config.toml`:
 
 ```toml
 [mcp_servers.browser]
-command = "podman"
-args = [
-  "run", "-i", "--rm",
-  "-p", "127.0.0.1:8765:8765",
-  "-p", "127.0.0.1:8766:8766",
-  "-v", "agent-tools-browser-profile:/var/lib/agent-tools/profile:U",
-  "-e", "AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.containers.internal:8767/",
-  "-e", "AGENT_TOOLS_BROWSER_CHANNEL=chromium",
-  "-e", "AGENT_TOOLS_BIND_ADDRESS=0.0.0.0",
-  "-e", "AGENT_TOOLS_PUBLIC_HOST=127.0.0.1",
-  "-e", "AGENT_TOOLS_HANDOFF_PORT=8765",
-  "-e", "AGENT_TOOLS_NOVNC_PORT=8766",
-  "-e", "AGENT_TOOLS_BROWSER_PROFILE=/var/lib/agent-tools/profile",
-  "agent-tools-browser",
-]
+command = "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser"
 startup_timeout_sec = 120
 ```
 
-`startup_timeout_sec` gives Xvfb and Chromium time to come up on a cold start. The same command works with `grok mcp add browser -- podman run -i --rm ...` using the arguments from the shell block above. Put no secret values in this file. `AGENT_TOOLS_NOTIFY_WEBHOOK` here is the local listener URL.
+`startup_timeout_sec` gives Xvfb and Chromium time to come up on a cold start. The same path works with `grok mcp add browser -- __REPO_ROOT__/runtimes/browser/bin/agent-tools-browser`. Put no secret values in this file. Set `AGENT_TOOLS_CONTAINER_ENGINE` in the server environment when the automatic choice is wrong.
 
 ### Register with Claude Code
 
-User scope makes the browser available in every project on the Mac:
+User scope makes the browser available in every project on the Mac. Replace `__REPO_ROOT__` with the absolute path of this repo:
 
 ```
-claude mcp add --scope user browser -- podman run -i --rm -p 127.0.0.1:8765:8765 -p 127.0.0.1:8766:8766 -v agent-tools-browser-profile:/var/lib/agent-tools/profile:U -e AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.containers.internal:8767/ -e AGENT_TOOLS_BROWSER_CHANNEL=chromium -e AGENT_TOOLS_BIND_ADDRESS=0.0.0.0 -e AGENT_TOOLS_PUBLIC_HOST=127.0.0.1 -e AGENT_TOOLS_HANDOFF_PORT=8765 -e AGENT_TOOLS_NOVNC_PORT=8766 -e AGENT_TOOLS_BROWSER_PROFILE=/var/lib/agent-tools/profile agent-tools-browser
+claude mcp add --scope user browser -- __REPO_ROOT__/runtimes/browser/bin/agent-tools-browser
 ```
 
 The same entry in `~/.claude.json`:
@@ -138,21 +132,7 @@ The same entry in `~/.claude.json`:
   "mcpServers": {
     "browser": {
       "type": "stdio",
-      "command": "podman",
-      "args": [
-        "run", "-i", "--rm",
-        "-p", "127.0.0.1:8765:8765",
-        "-p", "127.0.0.1:8766:8766",
-        "-v", "agent-tools-browser-profile:/var/lib/agent-tools/profile:U",
-        "-e", "AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.containers.internal:8767/",
-        "-e", "AGENT_TOOLS_BROWSER_CHANNEL=chromium",
-        "-e", "AGENT_TOOLS_BIND_ADDRESS=0.0.0.0",
-        "-e", "AGENT_TOOLS_PUBLIC_HOST=127.0.0.1",
-        "-e", "AGENT_TOOLS_HANDOFF_PORT=8765",
-        "-e", "AGENT_TOOLS_NOVNC_PORT=8766",
-        "-e", "AGENT_TOOLS_BROWSER_PROFILE=/var/lib/agent-tools/profile",
-        "agent-tools-browser"
-      ]
+      "command": "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser"
     }
   }
 }
@@ -162,28 +142,14 @@ If the handshake times out, set `MCP_TIMEOUT` (milliseconds) in the environment 
 
 ### Register with OMP
 
-The user file is `~/.omp/agent/mcp.json`. A project file `.omp/mcp.json` uses the same shape:
+The user file is `~/.omp/agent/mcp.json`. A project file `.omp/mcp.json` uses the same shape. Replace `__REPO_ROOT__` with the absolute path of this repo:
 
 ```json
 {
   "mcpServers": {
     "browser": {
       "type": "stdio",
-      "command": "podman",
-      "args": [
-        "run", "-i", "--rm",
-        "-p", "127.0.0.1:8765:8765",
-        "-p", "127.0.0.1:8766:8766",
-        "-v", "agent-tools-browser-profile:/var/lib/agent-tools/profile:U",
-        "-e", "AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.containers.internal:8767/",
-        "-e", "AGENT_TOOLS_BROWSER_CHANNEL=chromium",
-        "-e", "AGENT_TOOLS_BIND_ADDRESS=0.0.0.0",
-        "-e", "AGENT_TOOLS_PUBLIC_HOST=127.0.0.1",
-        "-e", "AGENT_TOOLS_HANDOFF_PORT=8765",
-        "-e", "AGENT_TOOLS_NOVNC_PORT=8766",
-        "-e", "AGENT_TOOLS_BROWSER_PROFILE=/var/lib/agent-tools/profile",
-        "agent-tools-browser"
-      ]
+      "command": "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser"
     }
   }
 }
@@ -194,10 +160,10 @@ The user file is `~/.omp/agent/mcp.json`. A project file `.omp/mcp.json` uses th
 On a machine with podman or docker:
 
 ```
-uv run --project runtimes/browser python runtimes/browser/contrib/smoke_container.py
+uv run --project runtimes/browser python runtimes/browser/contrib/smoke_container.py --engine podman
 ```
 
-The script builds the image, runs it with `-i`, checks MCP initialize and tools/list for `navigate`, `read`, `screenshot`, and `handoff`, and calls `navigate` on a page served from the host. It exits 2 when neither podman nor docker is on PATH. It removes only the container it started.
+`--engine docker` selects Docker. Omit `--engine` to use the launcher's automatic choice. The script runs `runtimes/browser/bin/agent-tools-browser --build`, checks MCP initialize and tools/list for `navigate`, `read`, `screenshot`, and `handoff`, and calls `navigate` on a page served from the host. It exits 2 when the requested engine is not on PATH, or when neither engine is available. It removes only the container and the profile volume it started.
 
 ## Tests
 
@@ -209,4 +175,4 @@ The behavior tests use a local HTTP server and a local webhook. They do not use 
 
 The macOS listener test stubs `osascript` and `open`. It does not need macOS.
 
-GitHub-hosted `ubuntu-latest` does not have the display stack, so CI runs the catalog check only.
+GitHub-hosted `ubuntu-latest` does not have the display stack, so the catalog job stays on the checker. A separate `ubuntu-latest` job builds the image with Docker and runs `smoke_container.py --engine docker`.
