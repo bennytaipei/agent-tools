@@ -1,6 +1,7 @@
 #!/bin/sh
 # Launch the browser MCP server in Docker or Podman.
 # Stdio is the container's stdio. --build builds the image and exits.
+# A stopped Podman machine or Docker Desktop is started only with permission.
 # See runtimes/browser/README.md.
 set -eu
 
@@ -20,6 +21,27 @@ if [ "$#" -eq 1 ]; then
   BUILD=1
 fi
 
+AUTO_START=${AGENT_TOOLS_AUTO_START_ENGINE:-ask}
+case $AUTO_START in
+  always|ask|never) ;;
+  *)
+    echo "AGENT_TOOLS_AUTO_START_ENGINE must be always, ask, or never." >&2
+    exit 2
+    ;;
+esac
+
+START_TIMEOUT=${AGENT_TOOLS_ENGINE_START_TIMEOUT:-120}
+case $START_TIMEOUT in
+  *[!0-9]*)
+    echo "AGENT_TOOLS_ENGINE_START_TIMEOUT must be a positive integer." >&2
+    exit 2
+    ;;
+esac
+if [ "$START_TIMEOUT" -lt 1 ]; then
+  echo "AGENT_TOOLS_ENGINE_START_TIMEOUT must be a positive integer." >&2
+  exit 2
+fi
+
 # A podman-docker shim answers `docker` but prints podman in its version or info.
 docker_is_podman_shim() {
   out=$(docker --version 2>&1 || true)
@@ -31,6 +53,153 @@ docker_is_podman_shim() {
     *[Pp]odman*) return 0 ;;
   esac
   return 1
+}
+
+# stdout of these probes stays off MCP stdout. stderr is discarded because
+# "unknown command" is the sign the feature is absent, not a user error.
+desktop_status_stopped() {
+  status=$("$1" desktop status 2>/dev/null || true)
+  case $status in
+    *[Ss]topped*|*[Nn]ot\ [Rr]unning*) return 0 ;;
+  esac
+  return 1
+}
+
+podman_machine_stopped() {
+  STOPPED_MACHINE=
+  MACHINE_BIN=$ENGINE
+  if [ "$STYLE" = "podman" ] && command -v podman >/dev/null 2>&1; then
+    MACHINE_BIN=podman
+  fi
+  list=$("$MACHINE_BIN" machine list --format '{{.Name}} {{.Running}} {{.Default}}' 2>/dev/null || true)
+  [ -n "$list" ] || return 1
+  chosen=
+  saved_ifs=$IFS
+  IFS='
+'
+  for line in $list; do
+    [ -n "$line" ] || continue
+    name=${line%% *}
+    rest=${line#* }
+    running=${rest%% *}
+    default=${rest#* }
+    case $running in
+      true)
+        IFS=$saved_ifs
+        return 1
+        ;;
+    esac
+    case $default in
+      true) chosen=$name ;;
+    esac
+    if [ -z "$chosen" ]; then
+      chosen=$name
+    fi
+  done
+  IFS=$saved_ifs
+  [ -n "$chosen" ] || return 1
+  STOPPED_MACHINE=$chosen
+  return 0
+}
+
+# 0 = start, 1 = denied, 2 = no way to ask.
+# MCP stdin and stdout are not used. macOS uses an osascript dialog.
+# Everywhere else reads the answer from /dev/tty.
+ask_start() {
+  question=$1
+  uname_s=$(uname -s)
+  if [ "$uname_s" = "Darwin" ]; then
+    if ! command -v osascript >/dev/null 2>&1; then
+      return 2
+    fi
+    if osascript -e "display dialog \"${question}\" buttons {\"Start\", \"Cancel\"} default button \"Start\" cancel button \"Cancel\" with title \"agent-tools-browser\"" >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  fi
+  if ! (: </dev/tty >/dev/tty) 2>/dev/null; then
+    return 2
+  fi
+  printf '%s [y/N]\n' "$question" > /dev/tty
+  answer=
+  if ! IFS= read -r answer < /dev/tty; then
+    return 2
+  fi
+  case $answer in
+    y|Y|yes|YES) return 0 ;;
+  esac
+  return 1
+}
+
+wait_until_ready() {
+  waited=0
+  while :; do
+    if "$ENGINE" info >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$waited" -ge "$START_TIMEOUT" ]; then
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+}
+
+# Start a stopped Podman machine or Docker Desktop, then wait until info works.
+# A daemon that is down for some other reason is left for the later exec.
+ensure_engine() {
+  if "$ENGINE" info >/dev/null 2>&1; then
+    return 0
+  fi
+  kind=
+  detail=
+  if [ "$STYLE" = "podman" ]; then
+    if podman_machine_stopped; then
+      kind=machine
+      detail="The Podman machine is stopped."
+    fi
+  elif desktop_status_stopped "$ENGINE"; then
+    kind=desktop
+    detail="Docker Desktop is not running."
+  fi
+  [ -n "$kind" ] || return 0
+
+  case $AUTO_START in
+    never)
+      echo "$detail Refusing to start it because AGENT_TOOLS_AUTO_START_ENGINE=never." >&2
+      exit 1
+      ;;
+    ask)
+      rc=0
+      ask_start "$detail Start it?" || rc=$?
+      if [ "$rc" -eq 1 ]; then
+        echo "$detail Start was cancelled." >&2
+        exit 1
+      fi
+      if [ "$rc" -ne 0 ]; then
+        echo "$detail No way to ask for permission. Set AGENT_TOOLS_AUTO_START_ENGINE=always to start it without asking." >&2
+        exit 1
+      fi
+      ;;
+  esac
+
+  # stdin is /dev/null so `podman machine start` does not prompt on MCP stdin.
+  # stdout is discarded so the start banner is not an MCP message.
+  if [ "$kind" = "machine" ]; then
+    if ! "$MACHINE_BIN" machine start "$STOPPED_MACHINE" </dev/null >/dev/null; then
+      echo "Podman machine failed to start." >&2
+      exit 1
+    fi
+  else
+    if ! "$ENGINE" desktop start </dev/null >/dev/null; then
+      echo "Docker Desktop failed to start." >&2
+      exit 1
+    fi
+  fi
+  if ! wait_until_ready; then
+    echo "Timed out after ${START_TIMEOUT}s waiting for ${ENGINE} to become ready." >&2
+    exit 1
+  fi
 }
 
 ENGINE=${AGENT_TOOLS_CONTAINER_ENGINE:-}
@@ -52,10 +221,15 @@ elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     ENGINE=docker
     STYLE=docker
   fi
+elif command -v docker >/dev/null 2>&1 && desktop_status_stopped docker; then
+  ENGINE=docker
+  STYLE=docker
 else
   ENGINE=podman
   STYLE=podman
 fi
+
+ensure_engine
 
 IMAGE=${AGENT_TOOLS_IMAGE:-agent-tools-browser}
 HANDOFF=${AGENT_TOOLS_HANDOFF_PORT:-8765}

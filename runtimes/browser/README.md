@@ -63,6 +63,23 @@ Benny's Mac is Apple Silicon. Podman runs the image in a linux/arm64 virtual mac
 
 A `docker` binary whose `--version` or `info` text contains `podman` is Podman's compat shim. The launcher treats that shim as Podman. A Mac that has only Podman works, including when `docker` is that shim.
 
+### Stopped engine
+
+If the chosen engine's VM or daemon is not running, the launcher asks before starting it.
+
+- Podman: `podman machine list` shows a machine and none of them are running. The launcher starts the default stopped machine, or the first stopped machine when none is the default. It does not create a machine.
+- Docker Desktop: `docker desktop status` reports that Desktop is stopped. The launcher runs `docker desktop start`. A `docker info` failure with no Desktop status is not treated as Docker Desktop. The launcher then keeps the Podman fallback above.
+
+`AGENT_TOOLS_AUTO_START_ENGINE` chooses what happens in that case:
+
+- `ask` (the default). On macOS the launcher shows an osascript dialog with Start and Cancel. Elsewhere it prompts on `/dev/tty` when that terminal can be opened. The prompt is not read from the MCP stdin.
+- `always`. Start without asking.
+- `never`. Do not start. Exit with an error.
+
+Cancel, a declined prompt, a missing `osascript`, or no openable `/dev/tty` exits with an error and does not start the engine.
+
+After a start, the launcher waits until `docker info` or `podman info` succeeds. The wait stops after `AGENT_TOOLS_ENGINE_START_TIMEOUT` seconds (default 120) and exits with an error.
+
 Podman mounts the profile volume with `:U` and uses the host alias `host.containers.internal`. Docker omits `:U`, uses `host.docker.internal`, and on Linux adds `--add-host=host.docker.internal:host-gateway`.
 
 ### Build
@@ -91,6 +108,8 @@ The launcher reads these names. Defaults are in parentheses. None of them is a s
 - `AGENT_TOOLS_BIND_ADDRESS` (`0.0.0.0`)
 - `AGENT_TOOLS_PUBLIC_HOST` (`127.0.0.1`)
 - `AGENT_TOOLS_BROWSER_CHANNEL` (`chromium`)
+- `AGENT_TOOLS_AUTO_START_ENGINE` (`ask`: `always`, `ask`, or `never`)
+- `AGENT_TOOLS_ENGINE_START_TIMEOUT` (`120`, seconds)
 
 `AGENT_TOOLS_PUBLIC_HOST` stays `127.0.0.1` so the page and the noVNC frame load in the browser on the machine in front of the container. Change a published port only by setting `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT`. The launcher publishes that same port on `127.0.0.1`.
 

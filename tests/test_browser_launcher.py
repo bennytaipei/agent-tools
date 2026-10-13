@@ -7,8 +7,10 @@ podman in /usr/bin must not see those binaries.
 from __future__ import annotations
 
 import os
+import pty
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -24,6 +26,9 @@ for arg in "$@"; do
 done
 printf '\\n' >> "$STUB_LOG"
 if [ "${1:-}" = "info" ]; then
+  if [ -n "${STUB_READY_FILE:-}" ] && [ -f "$STUB_READY_FILE" ]; then
+    exit 0
+  fi
   if [ "${STUB_INFO_PODMAN:-}" = "1" ]; then
     echo podman
   fi
@@ -37,6 +42,42 @@ if [ "${1:-}" = "--version" ]; then
   fi
   exit 0
 fi
+if [ "${1:-}" = "machine" ] && [ "${2:-}" = "list" ]; then
+  if [ -n "${STUB_MACHINE_LIST+x}" ]; then
+    printf '%s\n' "$STUB_MACHINE_LIST"
+  fi
+  exit 0
+fi
+if [ "${1:-}" = "machine" ] && [ "${2:-}" = "start" ]; then
+  if [ -n "${STUB_READY_FILE:-}" ]; then
+    printf '' > "$STUB_READY_FILE"
+  fi
+  exit "${STUB_START_RC:-0}"
+fi
+if [ "${1:-}" = "desktop" ] && [ "${2:-}" = "status" ]; then
+  if [ "${STUB_DESKTOP_STOPPED:-}" = "1" ]; then
+    echo "Docker Desktop is stopped"
+  fi
+  exit 0
+fi
+if [ "${1:-}" = "desktop" ] && [ "${2:-}" = "start" ]; then
+  if [ -n "${STUB_READY_FILE:-}" ]; then
+    printf '' > "$STUB_READY_FILE"
+  fi
+  exit "${STUB_START_RC:-0}"
+fi
+exit 0
+"""
+
+OSASCRIPT = """#!/bin/sh
+printf '%s' osascript >> "$STUB_LOG"
+for arg in "$@"; do
+  printf ' <%s>' "$arg" >> "$STUB_LOG"
+done
+printf '\\n' >> "$STUB_LOG"
+if [ "${STUB_DIALOG:-start}" = "cancel" ]; then
+  exit 1
+fi
 exit 0
 """
 
@@ -46,10 +87,10 @@ exit 0
 """
 
 
-def _bins(tmp_path: Path, *, docker: bool, podman: bool) -> Path:
+def _bins(tmp_path: Path, *, docker: bool, podman: bool, osascript: bool = True) -> Path:
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for tool in ("dirname", "basename"):
+    for tool in ("dirname", "basename", "sleep"):
         source = shutil.which(tool)
         if source is None:
             raise RuntimeError(f"{tool} is required to run the launcher")
@@ -65,6 +106,10 @@ def _bins(tmp_path: Path, *, docker: bool, podman: bool) -> Path:
     uname = bindir / "uname"
     uname.write_text(UNAME, encoding="utf-8")
     uname.chmod(0o755)
+    if osascript:
+        path = bindir / "osascript"
+        path.write_text(OSASCRIPT, encoding="utf-8")
+        path.chmod(0o755)
     return bindir
 
 
@@ -73,10 +118,11 @@ def _run(
     *,
     docker: bool = True,
     podman: bool = True,
+    osascript: bool = True,
     args: list[str] | None = None,
     extra: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
-    bindir = _bins(tmp_path, docker=docker, podman=podman)
+    bindir = _bins(tmp_path, docker=docker, podman=podman, osascript=osascript)
     log = tmp_path / "log"
     env = {
         "PATH": str(bindir),
@@ -125,6 +171,9 @@ def test_docker_on_linux_is_the_default(tmp_path: Path) -> None:
     assert "<-p> <127.0.0.1:8766:8766>" in line
     assert line.endswith(" <agent-tools-browser>")
     assert "host.containers.internal" not in line
+    assert "osascript" not in text
+    assert "<machine>" not in text
+    assert "<desktop>" not in text
 
 
 def test_podman_when_docker_info_fails(tmp_path: Path) -> None:
@@ -136,6 +185,7 @@ def test_podman_when_docker_info_fails(tmp_path: Path) -> None:
     assert "<AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.containers.internal:8767/>" in line
     assert "--add-host" not in line
     assert "host.docker.internal" not in line
+    assert "<start>" not in text
 
 
 def test_podman_when_docker_is_missing(tmp_path: Path) -> None:
@@ -212,10 +262,11 @@ def test_build_flag_only_builds(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     root = str(REPO)
     assert text.splitlines() == [
+        "podman <info>",
         (
             f"podman <build> <-f> <{root}/runtimes/browser/Containerfile> "
             f"<-t> <custom-browser> <{root}>"
-        )
+        ),
     ]
 
 
@@ -272,7 +323,8 @@ def test_stubs_hide_engines_outside_the_stub_dir(tmp_path: Path, monkeypatch) ->
     assert "POISON" not in text
     assert _run_lines(text)[0].startswith("podman <run>")
     logged = [line.split(" ", 1)[1] for line in text.splitlines() if line.startswith("PATH ")]
-    assert logged == [str(tmp_path / "bin")]
+    assert logged
+    assert set(logged) == {str(tmp_path / "bin")}
 
 
 def test_unknown_argument(tmp_path: Path) -> None:
@@ -280,3 +332,251 @@ def test_unknown_argument(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "usage:" in result.stderr
     assert text == ""
+
+
+def _stopped_machine(tmp_path: Path, **extra: str) -> dict[str, str]:
+    env = {
+        "AGENT_TOOLS_CONTAINER_ENGINE": "podman",
+        "STUB_INFO_RC": "1",
+        "STUB_READY_FILE": str(tmp_path / "ready"),
+        "STUB_MACHINE_LIST": "podman-machine-default false true",
+    }
+    env.update(extra)
+    return env
+
+
+def _assert_not_started(text: str) -> None:
+    assert "<machine> <start>" not in text
+    assert "<desktop> <start>" not in text
+    assert _run_lines(text) == []
+
+
+def test_auto_start_rejects_unknown_mode(tmp_path: Path) -> None:
+    result, text = _run(tmp_path, extra={"AGENT_TOOLS_AUTO_START_ENGINE": "sometimes"})
+    assert result.returncode == 2
+    assert "always, ask, or never" in result.stderr
+    assert text == ""
+
+
+def test_start_timeout_rejects_zero(tmp_path: Path) -> None:
+    result, text = _run(tmp_path, extra={"AGENT_TOOLS_ENGINE_START_TIMEOUT": "0"})
+    assert result.returncode == 2
+    assert "positive integer" in result.stderr
+    assert text == ""
+
+
+def test_podman_machine_never_does_not_start(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(tmp_path, AGENT_TOOLS_AUTO_START_ENGINE="never"),
+    )
+    assert result.returncode == 1
+    assert "AGENT_TOOLS_AUTO_START_ENGINE=never" in result.stderr
+    _assert_not_started(text)
+
+
+def test_podman_machine_ask_without_tty_does_not_start(tmp_path: Path) -> None:
+    result, text = _run(tmp_path, extra=_stopped_machine(tmp_path))
+    assert result.returncode == 1
+    assert "No way to ask for permission" in result.stderr
+    assert "AGENT_TOOLS_AUTO_START_ENGINE=always" in result.stderr
+    _assert_not_started(text)
+    assert "osascript" not in text
+
+
+def test_podman_machine_always_starts_then_runs(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(tmp_path, AGENT_TOOLS_AUTO_START_ENGINE="always"),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "podman <machine> <start> <podman-machine-default>" in text
+    assert _run_lines(text)[0].startswith("podman <run>")
+    assert "osascript" not in text
+
+
+def test_stopped_default_machine_is_the_one_started(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(
+            tmp_path,
+            AGENT_TOOLS_AUTO_START_ENGINE="always",
+            STUB_MACHINE_LIST="other false false\npodman-machine-default false true",
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "podman <machine> <start> <podman-machine-default>" in text
+    assert "<start> <other>" not in text
+
+
+def test_running_machine_is_not_started(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(
+            tmp_path,
+            AGENT_TOOLS_AUTO_START_ENGINE="always",
+            STUB_MACHINE_LIST="podman-machine-default true true\nother false",
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "<machine> <start>" not in text
+    assert "<desktop> <start>" not in text
+    assert _run_lines(text)[0].startswith("podman <run>")
+
+
+def test_darwin_dialog_start(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(tmp_path, STUB_UNAME="Darwin"),
+    )
+    assert result.returncode == 0, result.stderr
+    dialog = next(line for line in text.splitlines() if line.startswith("osascript "))
+    assert 'buttons {"Start", "Cancel"}' in dialog
+    assert 'cancel button "Cancel"' in dialog
+    assert "default button \"Start\"" in dialog
+    assert "podman <machine> <start> <podman-machine-default>" in text
+    assert _run_lines(text)[0].startswith("podman <run>")
+
+
+def test_darwin_dialog_cancel(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(tmp_path, STUB_UNAME="Darwin", STUB_DIALOG="cancel"),
+    )
+    assert result.returncode == 1
+    assert "Start was cancelled" in result.stderr
+    _assert_not_started(text)
+
+
+def test_darwin_without_osascript_does_not_start(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        osascript=False,
+        extra=_stopped_machine(tmp_path, STUB_UNAME="Darwin"),
+    )
+    assert result.returncode == 1
+    assert "No way to ask for permission" in result.stderr
+    _assert_not_started(text)
+
+
+def test_podman_machine_start_failure(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(
+            tmp_path,
+            AGENT_TOOLS_AUTO_START_ENGINE="always",
+            STUB_START_RC="1",
+        ),
+    )
+    assert result.returncode == 1
+    assert "Podman machine failed to start" in result.stderr
+    assert _run_lines(text) == []
+
+
+def test_engine_start_timeout(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(
+            tmp_path,
+            AGENT_TOOLS_AUTO_START_ENGINE="always",
+            AGENT_TOOLS_ENGINE_START_TIMEOUT="1",
+            STUB_READY_FILE="",
+        ),
+    )
+    assert result.returncode == 1
+    assert "Timed out after 1s waiting for podman" in result.stderr
+    assert _run_lines(text) == []
+
+
+def test_docker_desktop_always_starts_then_runs(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra={
+            "STUB_INFO_RC": "1",
+            "STUB_DESKTOP_STOPPED": "1",
+            "STUB_READY_FILE": str(tmp_path / "ready"),
+            "AGENT_TOOLS_AUTO_START_ENGINE": "always",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert "docker <desktop> <start>" in text
+    assert _run_lines(text)[0].startswith("docker <run>")
+    assert "podman <run>" not in text
+
+
+def test_build_starts_stopped_machine_and_does_not_run(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        args=["--build"],
+        extra=_stopped_machine(tmp_path, AGENT_TOOLS_AUTO_START_ENGINE="always"),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "podman <machine> <start> <podman-machine-default>" in text
+    assert "<build>" in text
+    assert _run_lines(text) == []
+
+
+def _run_tty(tmp_path: Path, answer: bytes, extra: dict[str, str]) -> tuple[int, str, str]:
+    bindir = _bins(tmp_path, docker=True, podman=True)
+    log = tmp_path / "log"
+    env = {
+        "PATH": str(bindir),
+        "STUB_LOG": str(log),
+        "HOME": str(tmp_path),
+        **extra,
+    }
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(REPO)
+        os.execve(str(LAUNCHER), [str(LAUNCHER)], env)
+        os._exit(127)
+    os.set_blocking(fd, False)
+    buf = b""
+    sent = False
+    status: int | None = None
+    deadline = time.time() + 5
+    try:
+        while time.time() < deadline:
+            try:
+                chunk = os.read(fd, 4096)
+            except BlockingIOError:
+                chunk = b""
+            except OSError:
+                chunk = b""
+            if chunk:
+                buf += chunk
+                if not sent and b"[y/N]" in buf:
+                    os.write(fd, answer)
+                    sent = True
+            wait_pid, wait_status = os.waitpid(pid, os.WNOHANG)
+            if wait_pid == pid:
+                status = wait_status
+                break
+            if not chunk:
+                time.sleep(0.02)
+        if status is None:
+            os.kill(pid, 15)
+            os.waitpid(pid, 0)
+            raise AssertionError(f"launcher did not exit, tty={buf!r}")
+    finally:
+        os.close(fd)
+    if os.WIFEXITED(status):
+        code = os.WEXITSTATUS(status)
+    else:
+        code = 1
+    text = log.read_text(encoding="utf-8") if log.exists() else ""
+    return code, buf.decode(errors="replace"), text
+
+
+def test_linux_tty_yes_starts_podman(tmp_path: Path) -> None:
+    code, _tty, text = _run_tty(tmp_path, b"y\n", _stopped_machine(tmp_path))
+    assert code == 0, text
+    assert "podman <machine> <start> <podman-machine-default>" in text
+    assert _run_lines(text)[0].startswith("podman <run>")
+
+
+def test_linux_tty_no_does_not_start(tmp_path: Path) -> None:
+    code, tty, text = _run_tty(tmp_path, b"n\n", _stopped_machine(tmp_path))
+    assert code == 1
+    assert "Start was cancelled" in tty
+    _assert_not_started(text)

@@ -56,6 +56,7 @@ Decisions:
 - Smoke uses a separate profile volume name (`AGENT_TOOLS_PROFILE_VOLUME`) so a smoke run does not write the real `agent-tools-browser-profile` volume.
 - `--build` only builds. Starting the server is a second invocation with no arguments. Smoke does those two steps.
 - Launcher tests do not put `/usr/bin` or the parent PATH on the child PATH. `dirname` and `basename` are symlinked into the stub directory.
+- A stopped Podman machine (`podman machine list`, none running) or stopped Docker Desktop (`docker desktop status`) is started only after permission. `AGENT_TOOLS_AUTO_START_ENGINE` is `ask` (default), `always`, or `never`. macOS asks with an osascript dialog whose buttons are Start and Cancel. Other systems prompt on `/dev/tty`. Cancel, no `osascript`, or no openable `/dev/tty` exits with an error. The launcher does not create a Podman machine and does not treat a generic `docker info` failure as Docker Desktop. After a start it waits until `info` succeeds, up to `AGENT_TOOLS_ENGINE_START_TIMEOUT` seconds (default 120). MCP stdin and stdout are not used for the question or the start banner.
 
 Files changed:
 - Part A: `tests/fixtures/browser_read/read_visibility.html`, `frame.html`, `research-progress.md`.
@@ -74,6 +75,8 @@ Commands that worked / failed:
 - Failed on GitHub Actions check job 38424819685: `test_podman_when_docker_is_missing` ran real `docker run` (pull access denied). `test_podman_shim_without_podman_binary_keeps_docker_command` ran real podman (`/etc/containers/registries.conf`). Cause: test PATH was `stubdir:/usr/bin:/bin`.
 - Worked after the PATH isolation: `uv run --with pytest --with pyyaml --with jsonschema pytest -q tests/test_browser_launcher.py` (13 passed).
 - Worked after `--build` exits without starting the server: `uv run scripts/check.py` (exit 0). Catalog pytest 25 passed in 1.44s. Runtime pytest 22 passed in 29.67s.
+- Worked after the stopped-engine prompt: `uv run --with pytest --with pyyaml --with jsonschema pytest -q tests/test_browser_launcher.py` (30 passed in 1.41s). The first run hung because the stub called `touch`, which is not on the isolated PATH. The stub now creates the ready file with `printf`.
+- Worked after that fix: `uv run scripts/check.py` (exit 0). Catalog pytest 41 passed in 2.52s. Runtime pytest 22 passed in 28.70s.
 
 Checked:
 - A. Fixture `tests/fixtures/browser_read/read_visibility.html` plus `frame.html`. Table above. Evidence is the `inner_text` run quoted in Commands.
@@ -88,11 +91,11 @@ Checked:
 - 9. `smoke_container.py` runs the launcher with `--build`, then starts it with `args=[]`. It accepts `--engine`. `test_smoke_engine.py` covers that split, exit 2, and the same engine choice.
 - 10. `.github/workflows/check.yml` job `smoke` on `ubuntu-latest` runs `smoke_container.py --engine docker`. The `check` job is unchanged aside from a comment. This machine did not run that job.
 - 11. `runtimes/browser/README.md` registers `__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser` for Grok Build, Claude Code, and OMP. Env vars are named. Launcher stub tests passed.
-- 12. `uv run scripts/check.py` exit 0. Catalog pytest 25 passed in 1.44s. Runtime pytest 22 passed in 29.67s. `browser.read` is `2.0.0`. The other browser manifests stay `1.0.0`.
+- 12. `uv run scripts/check.py` exit 0. Catalog pytest 41 passed in 2.52s. Runtime pytest 22 passed in 28.70s. `browser.read` is `2.0.0`. The other browser manifests stay `1.0.0`.
 - 13. Displays X1, X2, X10, and X13 remain. X16 was already up from another session and was left alone. No Chrome, Xvfb :200, or container from this task remains.
 
 Next action:
-- None. The PATH isolation and the `--build` exit are committed locally. Not pushed.
+- None. The stopped-engine prompt is committed locally. Not pushed.
 
 Unresolved (non-blocking):
 - This machine has no docker or podman, so the image was not built here. The `smoke` GitHub Actions job is the build. It runs when the branch is pushed.
