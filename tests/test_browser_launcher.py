@@ -1,8 +1,13 @@
-"""Launcher engine choice, with docker and podman replaced by PATH stubs."""
+"""Launcher engine choice, with docker and podman replaced by PATH stubs.
+
+The child PATH is only the stub directory. A runner that has real docker or
+podman in /usr/bin must not see those binaries.
+"""
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -10,6 +15,9 @@ REPO = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO / "runtimes" / "browser" / "bin" / "agent-tools-browser"
 
 STUB = """#!/bin/sh
+if [ "${STUB_LOG_PATH:-}" = "1" ]; then
+  printf 'PATH %s\\n' "$PATH" >> "$STUB_LOG"
+fi
 printf '%s' "$(basename "$0")" >> "$STUB_LOG"
 for arg in "$@"; do
   printf ' <%s>' "$arg" >> "$STUB_LOG"
@@ -41,6 +49,11 @@ exit 0
 def _bins(tmp_path: Path, *, docker: bool, podman: bool) -> Path:
     bindir = tmp_path / "bin"
     bindir.mkdir()
+    for tool in ("dirname", "basename"):
+        source = shutil.which(tool)
+        if source is None:
+            raise RuntimeError(f"{tool} is required to run the launcher")
+        os.symlink(source, bindir / tool)
     if docker:
         path = bindir / "docker"
         path.write_text(STUB, encoding="utf-8")
@@ -66,7 +79,7 @@ def _run(
     bindir = _bins(tmp_path, docker=docker, podman=podman)
     log = tmp_path / "log"
     env = {
-        "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "PATH": str(bindir),
         "STUB_LOG": str(log),
         "HOME": str(tmp_path),
     }
@@ -224,6 +237,23 @@ def test_notify_webhook_overrides_port(tmp_path: Path) -> None:
     line = _run_lines(text)[0]
     assert "<AGENT_TOOLS_NOTIFY_WEBHOOK=http://example.test/hook>" in line
     assert "9999" not in line
+
+
+def test_stubs_hide_engines_outside_the_stub_dir(tmp_path: Path, monkeypatch) -> None:
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    script = "#!/bin/sh\nprintf 'POISON %s\\n' \"$0\" >> \"${STUB_LOG:-/dev/null}\"\nexit 99\n"
+    for name in ("docker", "podman"):
+        path = poison / name
+        path.write_text(script, encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{poison}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}")
+    result, text = _run(tmp_path, docker=False, extra={"STUB_LOG_PATH": "1"})
+    assert result.returncode == 0, result.stderr
+    assert "POISON" not in text
+    assert _run_lines(text)[0].startswith("podman <run>")
+    logged = [line.split(" ", 1)[1] for line in text.splitlines() if line.startswith("PATH ")]
+    assert logged == [str(tmp_path / "bin")]
 
 
 def test_unknown_argument(tmp_path: Path) -> None:
