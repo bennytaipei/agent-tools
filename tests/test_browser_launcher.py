@@ -196,25 +196,43 @@ def test_docker_on_darwin_omits_add_host(tmp_path: Path) -> None:
     assert ":U>" not in line
 
 
-def test_build_flag_and_overrides(tmp_path: Path) -> None:
-    extra = {
-        "AGENT_TOOLS_CONTAINER_ENGINE": "podman",
-        "AGENT_TOOLS_IMAGE": "custom-browser",
-        "AGENT_TOOLS_NOTIFY_PORT": "9999",
-        "AGENT_TOOLS_HANDOFF_PORT": "9000",
-        "AGENT_TOOLS_NOVNC_PORT": "9001",
-        "AGENT_TOOLS_PROFILE_VOLUME": "profile-smoke",
-    }
-    result, text = _run(tmp_path, args=["--build"], extra=extra)
-    assert result.returncode == 0, result.stderr
-    lines = text.splitlines()
-    assert len(lines) == 2
-    build, run = lines
-    root = str(REPO)
-    assert build == (
-        f"podman <build> <-f> <{root}/runtimes/browser/Containerfile> "
-        f"<-t> <custom-browser> <{root}>"
+def test_build_flag_only_builds(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        args=["--build"],
+        extra={
+            "AGENT_TOOLS_CONTAINER_ENGINE": "podman",
+            "AGENT_TOOLS_IMAGE": "custom-browser",
+            "AGENT_TOOLS_NOTIFY_PORT": "9999",
+            "AGENT_TOOLS_HANDOFF_PORT": "9000",
+            "AGENT_TOOLS_NOVNC_PORT": "9001",
+            "AGENT_TOOLS_PROFILE_VOLUME": "profile-smoke",
+        },
     )
+    assert result.returncode == 0, result.stderr
+    root = str(REPO)
+    assert text.splitlines() == [
+        (
+            f"podman <build> <-f> <{root}/runtimes/browser/Containerfile> "
+            f"<-t> <custom-browser> <{root}>"
+        )
+    ]
+
+
+def test_run_overrides(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra={
+            "AGENT_TOOLS_CONTAINER_ENGINE": "podman",
+            "AGENT_TOOLS_IMAGE": "custom-browser",
+            "AGENT_TOOLS_NOTIFY_PORT": "9999",
+            "AGENT_TOOLS_HANDOFF_PORT": "9000",
+            "AGENT_TOOLS_NOVNC_PORT": "9001",
+            "AGENT_TOOLS_PROFILE_VOLUME": "profile-smoke",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    run = _run_lines(text)[0]
     assert "<127.0.0.1:9000:9000>" in run
     assert "<127.0.0.1:9001:9001>" in run
     assert "<AGENT_TOOLS_HANDOFF_PORT=9000>" in run
@@ -222,6 +240,7 @@ def test_build_flag_and_overrides(tmp_path: Path) -> None:
     assert "<AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.containers.internal:9999/>" in run
     assert "<profile-smoke:/var/lib/agent-tools/profile:U>" in run
     assert run.endswith(" <custom-browser>")
+    assert "<build>" not in run
 
 
 def test_notify_webhook_overrides_port(tmp_path: Path) -> None:

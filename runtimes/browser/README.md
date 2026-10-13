@@ -69,11 +69,13 @@ Podman mounts the profile volume with `:U` and uses the host alias `host.contain
 
 `runtimes/browser/Containerfile` builds on linux/arm64 and linux/amd64. The image contains Xvfb, x11vnc, websockify, noVNC, uv, the runtime, and Playwright Chromium with its OS packages. It sets `AGENT_TOOLS_BROWSER_CHANNEL` to `chromium`. The entrypoint is the MCP stdio server. The process user is `agent` (uid 1000). The profile directory is the volume path `/var/lib/agent-tools/profile`. The image contains no webhook URL and no other secret.
 
-From the repo root, `--build` runs that build with the chosen engine, then starts the container:
+From the repo root, `--build` builds that image with the chosen engine and exits. It does not start the server:
 
 ```
 runtimes/browser/bin/agent-tools-browser --build
 ```
+
+With no arguments, the launcher starts the server.
 
 ### Environment
 
@@ -163,7 +165,7 @@ On a machine with podman or docker:
 uv run --project runtimes/browser python runtimes/browser/contrib/smoke_container.py --engine podman
 ```
 
-`--engine docker` selects Docker. Omit `--engine` to use the launcher's automatic choice. The script runs `runtimes/browser/bin/agent-tools-browser --build`, checks MCP initialize and tools/list for `navigate`, `read`, `screenshot`, and `handoff`, and calls `navigate` on a page served from the host. It exits 2 when the requested engine is not on PATH, or when neither engine is available. It removes only the container and the profile volume it started.
+`--engine docker` selects Docker. Omit `--engine` to use the launcher's automatic choice. The script runs `runtimes/browser/bin/agent-tools-browser --build`, then starts `runtimes/browser/bin/agent-tools-browser` with no arguments. It checks MCP initialize and tools/list for `navigate`, `read`, `screenshot`, and `handoff`, and calls `navigate` on a page served from the host. It exits 2 when the requested engine is not on PATH, or when neither engine is available. It removes only the container and the profile volume it started.
 
 ## Tests
 

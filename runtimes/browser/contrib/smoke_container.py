@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Smoke-test the browser runtime container over MCP stdio.
 
-Uses runtimes/browser/bin/agent-tools-browser --build. --engine docker or
---engine podman selects the engine. With no --engine, the choice matches the
-launcher: docker when `docker info` succeeds, otherwise podman. A docker
-binary that reports podman is the Podman compat shim.
+Builds with runtimes/browser/bin/agent-tools-browser --build, then starts
+that launcher with no arguments. --engine docker or --engine podman selects
+the engine. With no --engine, the choice matches the launcher: docker when
+`docker info` succeeds, otherwise podman. A docker binary that reports
+podman is the Podman compat shim.
 
 Exit 0 when the smoke test passes. Exit 2 when the engine is not available.
 Exit 1 when the build or the protocol check fails.
@@ -72,6 +73,15 @@ def main(argv: list[str] | None = None) -> int:
         env["AGENT_TOOLS_HANDOFF_PORT"] = str(handoff)
         env["AGENT_TOOLS_NOVNC_PORT"] = str(novnc)
         env["AGENT_TOOLS_NOTIFY_WEBHOOK"] = "http://127.0.0.1:9/unused"
+        built = subprocess.run(
+            [str(LAUNCHER), "--build"],
+            env=env,
+            cwd=str(REPO),
+            check=False,
+        )
+        if built.returncode != 0:
+            print("image build failed", file=sys.stderr)
+            return 1
         asyncio.run(_exercise(env, url))
     finally:
         site.shutdown()
@@ -193,7 +203,7 @@ def _cleanup(engine: str, volume: str) -> None:
 async def _exercise(env: dict[str, str], url: str) -> None:
     server = StdioServerParameters(
         command=str(LAUNCHER),
-        args=["--build"],
+        args=[],
         env=env,
         cwd=str(REPO),
     )

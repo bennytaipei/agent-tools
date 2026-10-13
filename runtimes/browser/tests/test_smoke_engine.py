@@ -53,7 +53,8 @@ def test_smoke_uses_the_launcher() -> None:
     assert smoke.LAUNCHER == LAUNCHER
     assert LAUNCHER.is_file()
     source = SMOKE_PATH.read_text(encoding="utf-8")
-    assert "--build" in source
+    assert '[str(LAUNCHER), "--build"]' in source
+    assert "args=[]" in source
     assert "agent-tools-browser" in source
 
 
