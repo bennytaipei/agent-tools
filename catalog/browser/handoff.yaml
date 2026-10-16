@@ -1,6 +1,6 @@
 name: browser.handoff
-version: 1.0.0
-when_to_use: The live page needs Benny, usually because it is a login wall. One call starts the share, notifies him, waits, and ends the share.
+version: 1.1.0
+when_to_use: The live page needs Benny, usually because it is a login wall. One call starts the share, notifies him, waits, and ends the share. Pass done_when to end the share when the page URL, a CSS selector, or text matches.
 inputs:
   type: object
   additionalProperties: false
@@ -16,11 +16,42 @@ inputs:
       type: integer
       minimum: 1
       description: Seconds to block while Benny has the browser.
+    done_when:
+      description: End the share when this condition matches. Polled about once a second while the share is open. The first check runs immediately.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - url_matches
+          properties:
+            url_matches:
+              type: string
+              minLength: 1
+              description: Regular expression matched against the page URL.
+        - type: object
+          additionalProperties: false
+          required:
+            - selector_present
+          properties:
+            selector_present:
+              type: string
+              minLength: 1
+              description: CSS selector that is present on the page.
+        - type: object
+          additionalProperties: false
+          required:
+            - text_present
+          properties:
+            text_present:
+              type: string
+              minLength: 1
+              description: Text that is present on the page.
 outputs:
   type: object
   additionalProperties: false
   required:
     - status
+    - completed_by
   properties:
     status:
       type: string
@@ -28,11 +59,23 @@ outputs:
         - done
         - timeout
         - cancelled
-      description: done when Benny finishes, timeout when the wait elapses, cancelled when the handoff is cancelled.
-side_effects: Starts the HTTP noVNC share, notifies Benny, and blocks until he finishes, the timeout elapses, or the handoff is cancelled. Returns done, timeout, or cancelled. Ends the share itself in every case. No separate start, stop, notify, or status action.
+      description: done when Done is clicked or done_when matches, timeout when the wait elapses, cancelled when Cancel is clicked.
+    completed_by:
+      type: string
+      enum:
+        - user
+        - auto
+        - timeout
+        - cancelled
+      description: user when Done is clicked, auto when done_when matches, timeout when the wait elapses, cancelled when Cancel is clicked.
+    reason:
+      type: string
+      const: auto_detected
+      description: Present when completed_by is auto.
+side_effects: Starts the HTTP noVNC share, shows a page with the banner "Sign in or finish the step, then click Done." and Done and Cancel buttons, notifies Benny, and blocks until he finishes, done_when matches, the timeout elapses, or the handoff is cancelled. Returns status and completed_by. When done_when matches, status is done, completed_by is auto, and reason is auto_detected. Ends the share itself in every case. No separate start, stop, notify, or status action.
 errors:
   - code: share_failed
-    when: The HTTP noVNC share could not be started or ended.
+    when: The HTTP noVNC share could not be started or ended, or done_when url_matches is not a valid regular expression.
   - code: notify_failed
     when: Benny could not be notified on the handoff channel.
 auth_needed:

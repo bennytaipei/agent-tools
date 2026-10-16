@@ -119,7 +119,12 @@ class BrowserRuntime:
         if name == "browser.screenshot":
             return await self._browser.screenshot()
         if name == "browser.handoff":
-            return await self._browser.handoff(str(arguments["reason"]), int(arguments["timeout"]))
+            done_when = arguments.get("done_when")
+            return await self._browser.handoff(
+                str(arguments["reason"]),
+                int(arguments["timeout"]),
+                done_when if isinstance(done_when, dict) else None,
+            )
         if name == "browser.click":
             return await self._browser.click(arguments)
         if name == "browser.type":

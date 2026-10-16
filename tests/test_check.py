@@ -121,7 +121,7 @@ def test_browser_manifests():
     assert manifests["read.yaml"]["version"] == "2.0.0"
     assert manifests["navigate.yaml"]["version"] == "1.0.0"
     assert manifests["screenshot.yaml"]["version"] == "1.0.0"
-    assert manifests["handoff.yaml"]["version"] == "1.0.0"
+    assert manifests["handoff.yaml"]["version"] == "1.1.0"
     for name in ("click.yaml", "type.yaml", "scroll.yaml", "select.yaml", "wait_for.yaml"):
         assert manifests[name]["version"] == "1.0.0"
         assert manifests[name]["auth_needed"] == ["browser_session"]
@@ -174,6 +174,19 @@ def test_browser_manifests():
         "timeout",
         "cancelled",
     ]
+    assert manifests["handoff.yaml"]["outputs"]["required"] == ["status", "completed_by"]
+    assert manifests["handoff.yaml"]["outputs"]["properties"]["completed_by"]["enum"] == [
+        "user",
+        "auto",
+        "timeout",
+        "cancelled",
+    ]
+    assert manifests["handoff.yaml"]["outputs"]["properties"]["reason"]["const"] == "auto_detected"
+    assert "done_when" in manifests["handoff.yaml"]["inputs"]["properties"]
+    assert "done_when" not in manifests["handoff.yaml"]["inputs"]["required"]
+    assert "should" not in manifests["handoff.yaml"]["when_to_use"]
+    assert "should" not in manifests["handoff.yaml"]["side_effects"]
+    assert "Sign in or finish the step, then click Done." in manifests["handoff.yaml"]["side_effects"]
     assert manifests["read.yaml"]["side_effects"].startswith("None.")
     assert manifests["screenshot.yaml"]["side_effects"].startswith("None.")
 

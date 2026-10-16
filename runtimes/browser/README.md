@@ -2,7 +2,7 @@
 
 Reference MCP server for the browser tools. The manifests in `catalog/browser/` are the contract. This package loads each tool's name, description, and schemas from those files at startup.
 
-The server speaks MCP over stdio. A remote agent drives one headed Chrome session. On a login wall it calls `handoff`. Benny opens the returned URL, uses the same live browser through noVNC, and presses Done or Cancel.
+The server speaks MCP over stdio. A remote agent drives one headed Chrome session. On a login wall it calls `handoff`. Benny opens the returned URL, uses the same live browser through noVNC, and presses Done or Cancel. The page keeps those buttons visible and says "Sign in or finish the step, then click Done." Optional `done_when` ends the share when the page URL, a CSS selector, or text matches, and the result then has `completed_by` `auto` and `reason` `auto_detected`.
 
 ## Run
 

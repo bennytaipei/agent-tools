@@ -345,6 +345,14 @@ def test_fixed_ports_and_public_host(tmp_path: Path) -> None:
     asyncio.run(_fixed_ports_and_public_host(tmp_path))
 
 
+def test_handoff_auto_detects_without_a_click(tmp_path: Path) -> None:
+    asyncio.run(_handoff_auto_detects(tmp_path))
+
+
+def test_handoff_rejects_invalid_done_when_regex(tmp_path: Path) -> None:
+    asyncio.run(_handoff_bad_regex(tmp_path))
+
+
 def test_read_viewports_scroll_and_restore(tmp_path: Path) -> None:
     asyncio.run(_read_viewports_scroll_and_restore(tmp_path))
 
@@ -455,6 +463,9 @@ async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
             assert parsed.path.startswith("/h/")
             page_url = f"http://127.0.0.1:{page_port}{parsed.path}"
             page = urllib.request.urlopen(page_url, timeout=5).read().decode()
+            assert "Sign in or finish the step, then click Done." in page
+            assert "position: fixed" in page
+            assert "font-size: 28px" in page
             assert ">Done<" in page
             assert ">Cancel<" in page
             assert f"http://{public_host}:{public_novnc}/vnc.html" in page
@@ -466,13 +477,100 @@ async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
             with urllib.request.urlopen(request, timeout=5) as response:
                 assert response.status == 204
             result = _payload(await task)
-            assert result == {"status": "done"}
+            assert result == {"status": "done", "completed_by": "user"}
             _assert_output("browser.handoff", result)
             _assert_closed(novnc_port)
             _assert_closed(page_port)
     finally:
         webhook.shutdown()
         webhook.server_close()
+        reap(markers)
+
+
+async def _handoff_auto_detects(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    state = profile.parent / f"{profile.name}.runtime"
+    markers = [str(profile.resolve()), str(state.resolve())]
+    received: Queue[dict] = Queue()
+    site = _start_site()
+    webhook = _start_webhook(received)
+    site_port = site.server_address[1]
+    hook_port = webhook.server_address[1]
+    try:
+        async with _client(profile, f"http://127.0.0.1:{hook_port}/hook") as client:
+            navigated = _payload(
+                await _call(client, "navigate", {"url": f"http://127.0.0.1:{site_port}/landed"})
+            )
+            assert navigated["url"].endswith("/landed")
+            for done_when in (
+                {"text_present": MARKER},
+                {"selector_present": "p"},
+                {"url_matches": "/landed$"},
+            ):
+                task = asyncio.create_task(
+                    _call(
+                        client,
+                        "handoff",
+                        {"reason": "login wall", "timeout": 30, "done_when": done_when},
+                    )
+                )
+                payload = await _webhook_or_result(task, received)
+                assert payload["reason"] == "login wall"
+                result = _payload(await task)
+                assert result == {
+                    "status": "done",
+                    "completed_by": "auto",
+                    "reason": "auto_detected",
+                }
+                _assert_output("browser.handoff", result)
+                with pytest.raises(Empty):
+                    received.get_nowait()
+            task = asyncio.create_task(
+                _call(
+                    client,
+                    "handoff",
+                    {
+                        "reason": "login wall",
+                        "timeout": 1,
+                        "done_when": {"text_present": "NOT_ON_THE_PAGE"},
+                    },
+                )
+            )
+            payload = await _webhook_or_result(task, received)
+            assert payload["reason"] == "login wall"
+            result = _payload(await task)
+            assert result == {"status": "timeout", "completed_by": "timeout"}
+            _assert_output("browser.handoff", result)
+    finally:
+        site.shutdown()
+        webhook.shutdown()
+        site.server_close()
+        webhook.server_close()
+        reap(markers)
+
+
+async def _handoff_bad_regex(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    state = profile.parent / f"{profile.name}.runtime"
+    markers = [str(profile.resolve()), str(state.resolve())]
+    try:
+        async with _client(profile, "http://127.0.0.1:9/hook") as client:
+            result = await _call(
+                client,
+                "handoff",
+                {
+                    "reason": "login wall",
+                    "timeout": 5,
+                    "done_when": {"url_matches": "("},
+                },
+            )
+            code = _error_code(result)
+            assert code == "share_failed"
+            _assert_declared("browser.handoff", code)
+            assert pids_matching(markers) == []
+    finally:
         reap(markers)
 
 
@@ -593,6 +691,9 @@ async def _assert_handoff(
     assert "T" in parsed_expiry and parsed_expiry.endswith("+00:00")
 
     page = urllib.request.urlopen(payload["url"], timeout=5).read().decode()
+    assert "Sign in or finish the step, then click Done." in page
+    assert "position: fixed" in page
+    assert "font-size: 28px" in page
     assert ">Done<" in page
     assert ">Cancel<" in page
     novnc_port = int(page.split('data-novnc-port="', 1)[1].split('"', 1)[0])
@@ -613,7 +714,8 @@ async def _assert_handoff(
             assert response.status == 204
 
     result = _payload(await task)
-    assert result == {"status": status}
+    completed_by = {"done": "user", "cancelled": "cancelled", "timeout": "timeout"}[status]
+    assert result == {"status": status, "completed_by": completed_by}
     _assert_output("browser.handoff", result)
     _assert_closed(novnc_port)
     _assert_closed(page_port)

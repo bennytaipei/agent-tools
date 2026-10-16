@@ -138,7 +138,7 @@ class HandoffShare:
             self.stop()
             raise ShareError(f"{exc}; {detail}".strip()) from exc
 
-    def notify_and_wait(self, reason: str, timeout: int, webhook: str) -> str:
+    def notify(self, reason: str, timeout: int, webhook: str) -> None:
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
         payload = {"reason": reason, "url": self.url, "expires_at": expires_at}
         try:
@@ -146,10 +146,18 @@ class HandoffShare:
         except NotifyError:
             self.stop()
             raise
-        signaled = self._done.wait(timeout)
-        status = self._status if signaled else "timeout"
-        self.stop()
-        return status
+
+    def user_result(self) -> str | None:
+        if not self._done.is_set():
+            return None
+        if self._status not in {"done", "cancelled"}:
+            return None
+        return self._status
+
+    def wait_user(self, seconds: float) -> bool:
+        if seconds < 0:
+            seconds = 0.0
+        return self._done.wait(seconds)
 
     def stop(self) -> None:
         httpd = self._httpd
@@ -318,6 +326,20 @@ def _host_value(name: str, default: str) -> str:
     return raw
 
 
+def prepare_done_when(done_when: dict | None) -> None:
+    """Reject a done_when URL pattern that is not a regular expression."""
+
+    if not done_when:
+        return
+    pattern = done_when.get("url_matches")
+    if not isinstance(pattern, str):
+        return
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ShareError("done_when url_matches is not a regular expression") from exc
+
+
 def _optional_port(name: str) -> int | None:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -342,12 +364,42 @@ def _page(token: str, iframe_port: int, bound_novnc_port: int, public_host: str)
   <title>Browser handoff</title>
   <style>
     body {{ margin: 0; font-family: sans-serif; }}
-    .bar {{ display: flex; gap: 8px; padding: 8px; background: #222; }}
-    button {{ font-size: 16px; padding: 8px 16px; }}
-    iframe {{ width: 100vw; height: calc(100vh - 52px); border: 0; }}
+    .banner {{
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 20;
+      margin: 0;
+      padding: 12px 16px;
+      background: #111;
+      color: #fff;
+      font-size: 20px;
+    }}
+    .bar {{
+      position: fixed;
+      top: 52px;
+      left: 0;
+      right: 0;
+      z-index: 21;
+      display: flex;
+      gap: 12px;
+      padding: 8px 16px;
+      background: #222;
+    }}
+    button {{ font-size: 28px; padding: 14px 28px; }}
+    iframe {{
+      position: fixed;
+      top: 140px;
+      left: 0;
+      width: 100vw;
+      height: calc(100vh - 140px);
+      border: 0;
+    }}
   </style>
 </head>
 <body>
+  <p class="banner">Sign in or finish the step, then click Done.</p>
   <div class="bar" data-novnc-port="{bound_novnc_port}">
     <form method="post" action="/h/{token}/done"><button type="submit">Done</button></form>
     <form method="post" action="/h/{token}/cancel"><button type="submit">Cancel</button></form>

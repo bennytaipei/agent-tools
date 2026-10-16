@@ -7,13 +7,20 @@ import base64
 import logging
 import math
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
-from agent_tools_browser.handoff import HandoffShare, NotifyError, ShareError, os_environ_webhook
+from agent_tools_browser.handoff import (
+    HandoffShare,
+    NotifyError,
+    ShareError,
+    os_environ_webhook,
+    prepare_done_when,
+)
 from agent_tools_browser.interact import click as interact_click
 from agent_tools_browser.interact import scroll as interact_scroll
 from agent_tools_browser.interact import select as interact_select
@@ -38,6 +45,14 @@ PROFILE_ENV = "AGENT_TOOLS_BROWSER_PROFILE"
 CHANNEL_ENV = "AGENT_TOOLS_BROWSER_CHANNEL"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 READ_MAX_VIEWPORTS_DEFAULT = 10
+
+
+def _user_handoff(status: str | None) -> dict | None:
+    if status == "done":
+        return {"status": "done", "completed_by": "user"}
+    if status == "cancelled":
+        return {"status": "cancelled", "completed_by": "cancelled"}
+    return None
 READ_MAX_VIEWPORTS_LIMIT = 30
 CHROME_ARGS = [
     "--no-sandbox",
@@ -309,10 +324,20 @@ class BrowserSession:
             return page
         return await interact_wait_for(page, arguments)
 
-    async def handoff(self, reason: str, timeout: int) -> dict | str:
+    async def handoff(
+        self,
+        reason: str,
+        timeout: int,
+        done_when: dict | None = None,
+    ) -> dict | str:
         webhook = os_environ_webhook()
         if not webhook:
             return "notify_failed"
+        try:
+            prepare_done_when(done_when)
+        except ShareError:
+            log.exception("handoff done_when rejected")
+            return "share_failed"
         try:
             await self.ensure_started()
         except Exception:
@@ -323,7 +348,8 @@ class BrowserSession:
         self._share = share
         try:
             await asyncio.to_thread(share.start)
-            status = await asyncio.to_thread(share.notify_and_wait, reason, timeout, webhook)
+            await asyncio.to_thread(share.notify, reason, timeout, webhook)
+            outcome = await self._await_handoff(share, timeout, done_when)
         except NotifyError:
             log.exception("handoff notify failed")
             return "notify_failed"
@@ -334,9 +360,52 @@ class BrowserSession:
             await asyncio.to_thread(share.stop)
             if self._share is share:
                 self._share = None
-        if status not in {"done", "cancelled", "timeout"}:
-            return "share_failed"
-        return {"status": status}
+        return outcome
+
+    async def _await_handoff(
+        self,
+        share: HandoffShare,
+        timeout: int,
+        done_when: dict | None,
+    ) -> dict | str:
+        deadline = time.monotonic() + timeout
+        while True:
+            user = _user_handoff(share.user_result())
+            if user is not None:
+                return user
+            if done_when:
+                try:
+                    matched = await self._done_when_matches(done_when)
+                except Exception:
+                    log.exception("done_when poll failed")
+                    return "share_failed"
+                if matched:
+                    user = _user_handoff(share.user_result())
+                    if user is not None:
+                        return user
+                    return {
+                        "status": "done",
+                        "completed_by": "auto",
+                        "reason": "auto_detected",
+                    }
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return {"status": "timeout", "completed_by": "timeout"}
+            await asyncio.to_thread(share.wait_user, min(1.0, remaining))
+
+    async def _done_when_matches(self, done_when: dict) -> bool:
+        page = self._page
+        if page is None:
+            return False
+        if "url_matches" in done_when:
+            return re.search(str(done_when["url_matches"]), page.url) is not None
+        if "selector_present" in done_when:
+            count = await page.locator(str(done_when["selector_present"])).count()
+            return count > 0
+        if "text_present" in done_when:
+            count = await page.get_by_text(str(done_when["text_present"])).count()
+            return count > 0
+        return False
 
     async def ensure_started(self) -> None:
         async with self._start_lock:

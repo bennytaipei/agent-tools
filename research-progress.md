@@ -14,8 +14,8 @@ A7. CI workflow still includes the docker smoke job. Smoke script works with aut
 A8. No leftover Chrome, Xvfb, or containers this task started. Displays before this task: X1, X2, X10, X13, X16.
 
 Current state:
-- Interaction tools committed as d3a051f. Full catalog and runtime suites passed before that commit (check.py 0, catalog 41, runtime 23).
-- Per-session ports are implemented and stub-tested: launcher picks free host ports, unique names, trap stop/rm, public port URL. `tests/test_browser_launcher.py` 36 passed. `sh -n` passed. `test_fixed_ports_and_public_host` passed. Handoff UX 1.1.0 is not started.
+- Interaction tools are d3a051f. Per-session ports are edbcfc1. Handoff 1.1.0 is in the working tree, ready to commit.
+- Acceptance rows below are green.
 
 Decisions:
 - Interaction tools append after the existing four in catalog order.
@@ -23,22 +23,28 @@ Decisions:
 - Successful actions return url, title, scroll_y, viewport {width, height}, and a base64 PNG, plus an MCP image block labeled `after <tool>, scroll_y N`.
 - Error results stay `{code}` only.
 - Launcher treats unset, empty, 0, and auto as a free host port. Explicit ports are the published host ports. The container keeps listening on 8765 and 8766. `AGENT_TOOLS_PUBLIC_HANDOFF_PORT` and `AGENT_TOOLS_PUBLIC_NOVNC_PORT` are what the posted URL and noVNC frame use. `data-novnc-port` stays the bound listening port.
-- Container name is `agent-tools-browser-<pid>-<random>`, with `--rm` and a trap that stop/rm on INT, TERM, HUP, and EXIT. The engine run is backgrounded so the trap can fire. `--build` still execs.
-- handoff 1.1.0 adds optional `done_when` and required output `completed_by`. Auto match sets `reason` to `auto_detected`. `completed_by` is user, auto, timeout, or cancelled.
+- The launcher backgrounds the engine and redirects stdin from a duplicated fd so MCP stdio still reaches the container and the trap can run.
+- Container name is `agent-tools-browser-<pid>-<random>`, with `--rm` and a trap that stop/rm on INT, TERM, HUP, and EXIT. `--build` still execs.
+- handoff 1.1.0 adds optional `done_when` and required output `completed_by`. Auto match sets `reason` to `auto_detected`. `completed_by` is user, auto, timeout, or cancelled. The page banner is exactly "Sign in or finish the step, then click Done." Done and Cancel use position fixed and a 28px font.
 - Avoid the word "should" in manifests.
 
 Files changed:
-- Committed in d3a051f: five manifests, interact.py, session/server/catalog/validate, fixture, tests, catalog test list.
-- Ports slice: launcher, handoff public ports, launcher tests, both READMEs, smoke auto ports.
+- d3a051f: five interaction manifests, interact.py, session/server/catalog/validate, fixture, tests.
+- edbcfc1: launcher, public handoff ports, launcher tests, both READMEs, smoke auto ports.
+- Handoff 1.1.0: catalog/browser/handoff.yaml, handoff.py, session.py, server.py, runtime tests, test_check.py, runtime README.
 
 Commands that worked / failed:
-- `uv run scripts/check.py` exit 0 (before the ports edit).
-- Catalog pytest 41 passed. Runtime pytest 23 passed (includes test_page_interactions), before ports.
-- `sh -n runtimes/browser/bin/agent-tools-browser` passed inside launcher tests. Launcher pytest 36 passed, including concurrent launch and SIGTERM cleanup.
-- `test_listen_settings_*` and `test_fixed_ports_and_public_host` passed. Smoke engine assertion passed.
+- A1. `uv run scripts/check.py` exit 0 after handoff.yaml 1.1.0.
+- A2. Catalog pytest 47 passed.
+- A3. Runtime pytest 25 passed in 37.11s, including test_page_interactions, test_handoff_auto_detects_without_a_click, test_handoff_rejects_invalid_done_when_regex, manual Done, Cancel, and timeout.
+- A4. `uv run --with pytest pytest tests/test_browser_launcher.py -q` 36 passed in 4.85s, including test_concurrent_launches_get_distinct_ports and test_trap_cleanup_on_term. `sh -n` passes inside test_launcher_is_posix_sh.
+- A5. tests/test_check.py asserts click, type, scroll, select, and wait_for at 1.0.0, handoff at 1.1.0, navigate and screenshot at 1.0.0, read at 2.0.0. That test passed in the catalog run.
+- A6. Root README and runtimes/browser/README.md Grok and OMP examples set only the launcher command. Both explain optional `AGENT_TOOLS_HANDOFF_PORT` and `AGENT_TOOLS_NOVNC_PORT` pinning, and that empty, 0, and auto pick a free port.
+- A7. `.github/workflows/check.yml` smoke job still runs `smoke_container.py --engine docker`. The smoke script pops handoff and noVNC port env vars. `test_smoke_uses_the_launcher` passed.
+- A8. After the runtime suite, displays are X1, X2, X10, X13, X16. No Chrome process from this task. docker and podman are not on PATH, so no container was started.
 
 Next action:
-- Implement handoff 1.1.0 (banner, Done/Cancel, done_when, completed_by). Run full acceptance. Commit locally. Do not push.
+none
 
 Unresolved (non-blocking):
-- This machine has no docker or podman, so the image will not be built here. The GitHub Actions smoke job is the build.
+- This machine has no docker or podman, so the image was not built here. The GitHub Actions smoke job is the build.
