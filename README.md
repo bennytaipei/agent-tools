@@ -50,3 +50,30 @@ Tests for the checker live in `tests/` and run with:
 ```
 uv run --with pytest --with pyyaml --with jsonschema pytest -q
 ```
+
+## Browser runtime
+
+The reference server and the container launcher live in `runtimes/browser/`. Register `runtimes/browser/bin/agent-tools-browser` so each session publishes its own handoff ports. Replace `__REPO_ROOT__` with the absolute path of this repo.
+
+Grok Build, `~/.grok/config.toml`:
+
+```toml
+[mcp_servers.browser]
+command = "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser"
+startup_timeout_sec = 120
+```
+
+OMP, `~/.omp/agent/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "type": "stdio",
+      "command": "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser"
+    }
+  }
+}
+```
+
+The examples leave the ports unset. The launcher picks a free host port for the handoff page and another for noVNC. Set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT` to pin a published port. An empty value, `0`, and `auto` also pick a free port. The container still listens on `8765` and `8766`.

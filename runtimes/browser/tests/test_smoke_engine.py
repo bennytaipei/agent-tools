@@ -56,6 +56,11 @@ def test_smoke_uses_the_launcher() -> None:
     assert '[str(LAUNCHER), "--build"]' in source
     assert "args=[]" in source
     assert "agent-tools-browser" in source
+    assert 'env["AGENT_TOOLS_HANDOFF_PORT"]' not in source
+    assert 'env["AGENT_TOOLS_NOVNC_PORT"]' not in source
+    assert '"AGENT_TOOLS_HANDOFF_PORT"' in source
+    assert '"AGENT_TOOLS_NOVNC_PORT"' in source
+    assert "env.pop(name, None)" in source
 
 
 def test_help_lists_engine(capsys: pytest.CaptureFixture[str]) -> None:

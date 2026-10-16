@@ -33,7 +33,9 @@ from agent_tools_browser.handoff import (
     BIND_ENV,
     HANDOFF_PORT_ENV,
     NOVNC_PORT_ENV,
+    PUBLIC_HANDOFF_PORT_ENV,
     PUBLIC_HOST_ENV,
+    PUBLIC_NOVNC_PORT_ENV,
     ShareError,
     listen_settings,
 )
@@ -289,13 +291,22 @@ def test_browser_channel_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_listen_settings_unset_keeps_free_ports(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in (HANDOFF_PORT_ENV, NOVNC_PORT_ENV, BIND_ENV, PUBLIC_HOST_ENV):
+    for name in (
+        HANDOFF_PORT_ENV,
+        NOVNC_PORT_ENV,
+        PUBLIC_HANDOFF_PORT_ENV,
+        PUBLIC_NOVNC_PORT_ENV,
+        BIND_ENV,
+        PUBLIC_HOST_ENV,
+    ):
         monkeypatch.delenv(name, raising=False)
     settings = listen_settings()
     assert settings.bind_host == "127.0.0.1"
     assert settings.public_host == "127.0.0.1"
     assert settings.page_port is None
     assert settings.novnc_port is None
+    assert settings.public_page_port is None
+    assert settings.public_novnc_port is None
 
 
 def test_listen_settings_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -309,6 +320,10 @@ def test_listen_settings_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.bind_host == "0.0.0.0"
     assert settings.public_host == "browser.example"
     monkeypatch.setenv(HANDOFF_PORT_ENV, "0")
+    with pytest.raises(ShareError):
+        listen_settings()
+    monkeypatch.setenv(HANDOFF_PORT_ENV, "8765")
+    monkeypatch.setenv(PUBLIC_HANDOFF_PORT_ENV, "0")
     with pytest.raises(ShareError):
         listen_settings()
 
@@ -412,7 +427,7 @@ async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
     profile.mkdir()
     state = profile.parent / f"{profile.name}.runtime"
     markers = [str(profile.resolve()), str(state.resolve())]
-    page_port, novnc_port = _two_free_ports()
+    page_port, novnc_port, public_page, public_novnc = _free_ports(4)
     received: Queue[dict] = Queue()
     webhook = _start_webhook(received)
     hook_port = webhook.server_address[1]
@@ -420,6 +435,8 @@ async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
     extra = {
         HANDOFF_PORT_ENV: str(page_port),
         NOVNC_PORT_ENV: str(novnc_port),
+        PUBLIC_HANDOFF_PORT_ENV: str(public_page),
+        PUBLIC_NOVNC_PORT_ENV: str(public_novnc),
         BIND_ENV: "0.0.0.0",
         PUBLIC_HOST_ENV: public_host,
     }
@@ -434,13 +451,13 @@ async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
             parsed = urlsplit(payload["url"])
             assert parsed.scheme == "http"
             assert parsed.hostname == public_host
-            assert parsed.port == page_port
+            assert parsed.port == public_page
             assert parsed.path.startswith("/h/")
             page_url = f"http://127.0.0.1:{page_port}{parsed.path}"
             page = urllib.request.urlopen(page_url, timeout=5).read().decode()
             assert ">Done<" in page
             assert ">Cancel<" in page
-            assert f"http://{public_host}:{novnc_port}/vnc.html" in page
+            assert f"http://{public_host}:{public_novnc}/vnc.html" in page
             assert int(page.split('data-novnc-port="', 1)[1].split('"', 1)[0]) == novnc_port
             assert port_is_open(novnc_port)
             novnc = urllib.request.urlopen(f"http://127.0.0.1:{novnc_port}/vnc.html", timeout=5)
@@ -459,17 +476,17 @@ async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
         reap(markers)
 
 
-def _two_free_ports() -> tuple[int, int]:
+def _free_ports(count: int) -> list[int]:
     sockets = []
     ports: list[int] = []
-    for _ in range(2):
+    for _ in range(count):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(("127.0.0.1", 0))
         ports.append(sock.getsockname()[1])
         sockets.append(sock)
     for sock in sockets:
         sock.close()
-    return ports[0], ports[1]
+    return ports
 
 
 def _assert_browser_binary(markers: list[str], channel: str | None) -> None:

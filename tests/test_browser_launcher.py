@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import os
 import pty
+import re
 import shutil
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -66,6 +68,11 @@ if [ "${1:-}" = "desktop" ] && [ "${2:-}" = "start" ]; then
   fi
   exit "${STUB_START_RC:-0}"
 fi
+if [ "${1:-}" = "run" ] && [ -n "${STUB_RUN_HOLD:-}" ]; then
+  while [ ! -f "$STUB_RUN_HOLD" ]; do
+    sleep 0.05
+  done
+fi
 exit 0
 """
 
@@ -87,14 +94,26 @@ exit 0
 """
 
 
-def _bins(tmp_path: Path, *, docker: bool, podman: bool, osascript: bool = True) -> Path:
+def _bins(
+    tmp_path: Path,
+    *,
+    docker: bool,
+    podman: bool,
+    osascript: bool = True,
+    python3: bool = True,
+) -> Path:
     bindir = tmp_path / "bin"
-    bindir.mkdir()
-    for tool in ("dirname", "basename", "sleep"):
+    bindir.mkdir(parents=True)
+    for tool in ("dirname", "basename", "sleep", "rm"):
         source = shutil.which(tool)
         if source is None:
             raise RuntimeError(f"{tool} is required to run the launcher")
         os.symlink(source, bindir / tool)
+    if python3:
+        source = shutil.which("python3")
+        if source is None:
+            raise RuntimeError("python3 is required to run the launcher")
+        os.symlink(source, bindir / "python3")
     if docker:
         path = bindir / "docker"
         path.write_text(STUB, encoding="utf-8")
@@ -119,10 +138,17 @@ def _run(
     docker: bool = True,
     podman: bool = True,
     osascript: bool = True,
+    python3: bool = True,
     args: list[str] | None = None,
     extra: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
-    bindir = _bins(tmp_path, docker=docker, podman=podman, osascript=osascript)
+    bindir = _bins(
+        tmp_path,
+        docker=docker,
+        podman=podman,
+        osascript=osascript,
+        python3=python3,
+    )
     log = tmp_path / "log"
     env = {
         "PATH": str(bindir),
@@ -147,10 +173,40 @@ def _run_lines(text: str) -> list[str]:
     return [line for line in text.splitlines() if " <run>" in line]
 
 
+_NAME_RE = re.compile(r"<--name> <(agent-tools-browser-\d+-[0-9a-f]+)>")
+_PORT_RE = re.compile(r"<127\.0\.0\.1:(\d+):(\d+)>")
+
+
+def _name_and_ports(line: str) -> tuple[str, list[tuple[str, str]]]:
+    name = _NAME_RE.search(line)
+    assert name is not None, line
+    ports = _PORT_RE.findall(line)
+    assert len(ports) == 2, line
+    return name.group(1), ports
+
+
+def _assert_published(line: str, handoff_host: str | None, novnc_host: str | None) -> tuple[str, str, str]:
+    name, ports = _name_and_ports(line)
+    assert ports[0][1] == "8765", line
+    assert ports[1][1] == "8766", line
+    if handoff_host is not None:
+        assert ports[0][0] == handoff_host
+    if novnc_host is not None:
+        assert ports[1][0] == novnc_host
+    assert ports[0][0] != ports[1][0]
+    assert ports[0][0] != "0" and ports[1][0] != "0"
+    assert f"<AGENT_TOOLS_HANDOFF_PORT=8765>" in line
+    assert f"<AGENT_TOOLS_NOVNC_PORT=8766>" in line
+    assert f"<AGENT_TOOLS_PUBLIC_HANDOFF_PORT={ports[0][0]}>" in line
+    assert f"<AGENT_TOOLS_PUBLIC_NOVNC_PORT={ports[1][0]}>" in line
+    return name, ports[0][0], ports[1][0]
+
+
 def test_launcher_is_posix_sh() -> None:
     text = LAUNCHER.read_text(encoding="utf-8")
     assert text.startswith("#!/bin/sh\n")
-    assert "\nexec " in text
+    assert 'exec "$ENGINE" build ' in text
+    assert '\nexec "$ENGINE"' not in text
     assert LAUNCHER.stat().st_mode & 0o111
     result = subprocess.run(["sh", "-n", str(LAUNCHER)], check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -167,8 +223,9 @@ def test_docker_on_linux_is_the_default(tmp_path: Path) -> None:
     assert "<agent-tools-browser-profile:/var/lib/agent-tools/profile>" in line
     assert ":U>" not in line
     assert "<AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.docker.internal:8767/>" in line
-    assert "<-p> <127.0.0.1:8765:8765>" in line
-    assert "<-p> <127.0.0.1:8766:8766>" in line
+    name, _handoff, _novnc = _assert_published(line, None, None)
+    assert f"<stop> <-t> <1> <{name}>" in text
+    assert f"<rm> <-f> <{name}>" in text
     assert line.endswith(" <agent-tools-browser>")
     assert "host.containers.internal" not in line
     assert "osascript" not in text
@@ -284,10 +341,7 @@ def test_run_overrides(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     run = _run_lines(text)[0]
-    assert "<127.0.0.1:9000:9000>" in run
-    assert "<127.0.0.1:9001:9001>" in run
-    assert "<AGENT_TOOLS_HANDOFF_PORT=9000>" in run
-    assert "<AGENT_TOOLS_NOVNC_PORT=9001>" in run
+    _assert_published(run, "9000", "9001")
     assert "<AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.containers.internal:9999/>" in run
     assert "<profile-smoke:/var/lib/agent-tools/profile:U>" in run
     assert run.endswith(" <custom-browser>")
@@ -305,8 +359,9 @@ def test_notify_webhook_overrides_port(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     line = _run_lines(text)[0]
-    assert "<AGENT_TOOLS_NOTIFY_WEBHOOK=http://example.test/hook>" in line
-    assert "9999" not in line
+    assert "AGENT_TOOLS_NOTIFY_PORT" not in line
+    webhook_bits = [part for part in line.split(" <") if "NOTIFY_WEBHOOK=" in part]
+    assert webhook_bits == ["AGENT_TOOLS_NOTIFY_WEBHOOK=http://example.test/hook>"]
 
 
 def test_stubs_hide_engines_outside_the_stub_dir(tmp_path: Path, monkeypatch) -> None:
@@ -580,3 +635,146 @@ def test_linux_tty_no_does_not_start(tmp_path: Path) -> None:
     assert code == 1
     assert "Start was cancelled" in tty
     _assert_not_started(text)
+
+
+def test_unset_empty_zero_and_auto_pick_free_host_ports(tmp_path: Path) -> None:
+    cases = (
+        {},
+        {"AGENT_TOOLS_HANDOFF_PORT": "", "AGENT_TOOLS_NOVNC_PORT": ""},
+        {"AGENT_TOOLS_HANDOFF_PORT": "0", "AGENT_TOOLS_NOVNC_PORT": "0"},
+        {"AGENT_TOOLS_HANDOFF_PORT": "auto", "AGENT_TOOLS_NOVNC_PORT": "auto"},
+        {"AGENT_TOOLS_HANDOFF_PORT": "0", "AGENT_TOOLS_NOVNC_PORT": "auto"},
+    )
+    for index, extra in enumerate(cases):
+        result, text = _run(tmp_path / f"case-{index}", extra=extra or None)
+        assert result.returncode == 0, result.stderr
+        line = _run_lines(text)[0]
+        _assert_published(line, None, None)
+        assert "<127.0.0.1:0:" not in line
+
+
+def test_explicit_ports_map_onto_container_listeners(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra={"AGENT_TOOLS_HANDOFF_PORT": "9000"},
+    )
+    assert result.returncode == 0, result.stderr
+    line = _run_lines(text)[0]
+    _name, handoff, novnc = _assert_published(line, "9000", None)
+    assert novnc != "9000"
+    assert f"<127.0.0.1:{novnc}:8766>" in line
+
+
+def test_unique_container_names(tmp_path: Path) -> None:
+    _result_a, text_a = _run(tmp_path / "a")
+    _result_b, text_b = _run(tmp_path / "b")
+    name_a, _ports_a = _name_and_ports(_run_lines(text_a)[0])
+    name_b, _ports_b = _name_and_ports(_run_lines(text_b)[0])
+    assert name_a != name_b
+
+
+def test_port_scan_without_python3(tmp_path: Path) -> None:
+    result, text = _run(tmp_path, python3=False)
+    assert result.returncode == 0, result.stderr
+    line = _run_lines(text)[0]
+    _assert_published(line, None, None)
+
+
+def _popen(
+    tmp_path: Path,
+    *,
+    extra: dict[str, str] | None = None,
+) -> subprocess.Popen[str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    bindir = _bins(tmp_path, docker=True, podman=True)
+    log = tmp_path / "log"
+    env = {
+        "PATH": str(bindir),
+        "STUB_LOG": str(log),
+        "HOME": str(tmp_path),
+    }
+    if extra:
+        env.update(extra)
+    return subprocess.Popen(
+        [str(LAUNCHER)],
+        env=env,
+        cwd=REPO,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+
+def _wait_log(path: Path, needle: str, timeout: float = 8.0) -> str:
+    deadline = time.time() + timeout
+    last = ""
+    while time.time() < deadline:
+        if path.exists():
+            last = path.read_text(encoding="utf-8")
+            if needle in last:
+                return last
+        time.sleep(0.05)
+    raise AssertionError(f"missing {needle!r} in {last!r}")
+
+
+def _stop_procs(procs: list[subprocess.Popen[str]]) -> None:
+    for proc in procs:
+        if proc.poll() is None:
+            os.kill(proc.pid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.kill(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=3)
+
+
+def test_trap_cleanup_on_term(tmp_path: Path) -> None:
+    hold = tmp_path / "hold"
+    work = tmp_path / "run"
+    proc = _popen(work, extra={"STUB_RUN_HOLD": str(hold)})
+    try:
+        text = _wait_log(work / "log", " <run>")
+        name, _ports = _name_and_ports(_run_lines(text)[0])
+        os.kill(proc.pid, signal.SIGTERM)
+        code = proc.wait(timeout=8)
+        log = (work / "log").read_text(encoding="utf-8")
+        assert f"<stop> <-t> <1> <{name}>" in log
+        assert f"<rm> <-f> <{name}>" in log
+        assert code == 143, log
+    finally:
+        hold.write_text("go\n", encoding="utf-8")
+        _stop_procs([proc])
+
+
+def test_concurrent_launches_get_distinct_ports(tmp_path: Path) -> None:
+    hold = tmp_path / "hold"
+    procs: list[subprocess.Popen[str]] = []
+    try:
+        procs = [
+            _popen(tmp_path / "a", extra={"STUB_RUN_HOLD": str(hold)}),
+            _popen(tmp_path / "b", extra={"STUB_RUN_HOLD": str(hold)}),
+        ]
+        text_a = _wait_log(tmp_path / "a" / "log", " <run>")
+        text_b = _wait_log(tmp_path / "b" / "log", " <run>")
+        name_a, ports_a = _name_and_ports(_run_lines(text_a)[0])
+        name_b, ports_b = _name_and_ports(_run_lines(text_b)[0])
+        assert name_a != name_b
+        hosts_a = {ports_a[0][0], ports_a[1][0]}
+        hosts_b = {ports_b[0][0], ports_b[1][0]}
+        assert hosts_a.isdisjoint(hosts_b)
+        assert ports_a[0][1] == "8765" and ports_a[1][1] == "8766"
+        assert ports_b[0][1] == "8765" and ports_b[1][1] == "8766"
+        hold.write_text("go\n", encoding="utf-8")
+        for proc in procs:
+            code = proc.wait(timeout=8)
+            assert code == 0
+        final_a = (tmp_path / "a" / "log").read_text(encoding="utf-8")
+        final_b = (tmp_path / "b" / "log").read_text(encoding="utf-8")
+        assert f"<stop> <-t> <1> <{name_a}>" in final_a
+        assert f"<rm> <-f> <{name_a}>" in final_a
+        assert f"<stop> <-t> <1> <{name_b}>" in final_b
+        assert f"<rm> <-f> <{name_b}>" in final_b
+    finally:
+        hold.write_text("go\n", encoding="utf-8")
+        _stop_procs(procs)

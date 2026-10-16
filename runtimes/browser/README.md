@@ -23,8 +23,10 @@ Set these in the server process. The repo never stores their values.
 - `AGENT_TOOLS_BROWSER_PROFILE`: directory for the persistent Chrome profile. The runtime also writes an X authority file and handoff token files under a sibling directory named `<profile-name>.runtime`.
 - `AGENT_TOOLS_NOTIFY_WEBHOOK`: URL that receives one JSON POST when a handoff starts. The body is `reason`, `url`, and `expires_at`. No variable, or a failed POST, returns `notify_failed` and tears the share down.
 - `AGENT_TOOLS_BROWSER_CHANNEL`: `chrome` (the default when unset) uses system Chrome. `chromium` uses Playwright's bundled Chromium. Install that browser once with `uv run --project runtimes/browser playwright install chromium`. The container image sets `chromium` because linux/arm64 has no Google Chrome package.
-- `AGENT_TOOLS_HANDOFF_PORT`: TCP port for the handoff page. Unset chooses a free port.
-- `AGENT_TOOLS_NOVNC_PORT`: TCP port for websockify and noVNC. Unset chooses a free port. x11vnc stays on its own free localhost port.
+- `AGENT_TOOLS_HANDOFF_PORT`: TCP port the handoff page binds. Unset chooses a free port. `0` is rejected here. The container launcher, not this process, turns unset, empty, `0`, and `auto` into a published host port and passes that port as `AGENT_TOOLS_PUBLIC_HANDOFF_PORT`.
+- `AGENT_TOOLS_NOVNC_PORT`: TCP port websockify binds. Unset chooses a free port. `0` is rejected here. x11vnc stays on its own free localhost port. The launcher passes the published host port as `AGENT_TOOLS_PUBLIC_NOVNC_PORT`.
+- `AGENT_TOOLS_PUBLIC_HANDOFF_PORT`: port in the URL posted to the webhook. Unset uses the bound handoff port.
+- `AGENT_TOOLS_PUBLIC_NOVNC_PORT`: port in the page's noVNC frame. Unset uses the bound noVNC port. The page's `data-novnc-port` stays the bound port.
 - `AGENT_TOOLS_BIND_ADDRESS`: address the handoff page and websockify bind. Unset is `127.0.0.1`. A container sets `0.0.0.0` so published ports reach the listeners.
 - `AGENT_TOOLS_PUBLIC_HOST`: host in the URL posted to the webhook and in the page's noVNC frame. Unset is `127.0.0.1`. Benny's browser loads this host, so it is the address published on the machine in front of the container.
 
@@ -51,7 +53,7 @@ The MCP tool names are `navigate`, `read`, `screenshot`, `handoff`, `click`, `ty
 
 ## Run in a container
 
-`runtimes/browser/bin/agent-tools-browser` is the stdio command to register. It is POSIX sh. It chooses an engine, then execs that engine with `run -i --rm`. The harness speaks MCP on the container's stdin and stdout. The handoff page and noVNC are published on `127.0.0.1`.
+`runtimes/browser/bin/agent-tools-browser` is the stdio command to register. It is POSIX sh. It chooses an engine, then runs that engine with `run -i --rm` under a unique container name. The harness speaks MCP on the container's stdin and stdout. When the client closes stdin or signals the launcher, the launcher stops and removes that container. The handoff page and noVNC are published on `127.0.0.1`.
 
 Benny's Mac is Apple Silicon. Podman runs the image in a linux/arm64 virtual machine. The same launcher uses Docker on Linux.
 
@@ -101,8 +103,8 @@ The launcher reads these names. Defaults are in parentheses. None of them is a s
 - `AGENT_TOOLS_CONTAINER_ENGINE` (unset: the choice above)
 - `AGENT_TOOLS_IMAGE` (`agent-tools-browser`)
 - `AGENT_TOOLS_PROFILE_VOLUME` (`agent-tools-browser-profile`)
-- `AGENT_TOOLS_HANDOFF_PORT` (`8765`)
-- `AGENT_TOOLS_NOVNC_PORT` (`8766`)
+- `AGENT_TOOLS_HANDOFF_PORT` (unset, empty, `0`, or `auto`: a free host port). An explicit number is the published host port. The container still listens on `8765`.
+- `AGENT_TOOLS_NOVNC_PORT` (unset, empty, `0`, or `auto`: a free host port). An explicit number is the published host port. The container still listens on `8766`.
 - `AGENT_TOOLS_NOTIFY_PORT` (`8767`)
 - `AGENT_TOOLS_NOTIFY_WEBHOOK` (unset: `http://` plus the engine host alias, plus `AGENT_TOOLS_NOTIFY_PORT`)
 - `AGENT_TOOLS_BIND_ADDRESS` (`0.0.0.0`)
@@ -111,7 +113,9 @@ The launcher reads these names. Defaults are in parentheses. None of them is a s
 - `AGENT_TOOLS_AUTO_START_ENGINE` (`ask`: `always`, `ask`, or `never`)
 - `AGENT_TOOLS_ENGINE_START_TIMEOUT` (`120`, seconds)
 
-`AGENT_TOOLS_PUBLIC_HOST` stays `127.0.0.1` so the page and the noVNC frame load in the browser on the machine in front of the container. Change a published port only by setting `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT`. The launcher publishes that same port on `127.0.0.1`.
+`AGENT_TOOLS_PUBLIC_HOST` stays `127.0.0.1` so the page and the noVNC frame load in the browser on the machine in front of the container. The launcher publishes the handoff page and noVNC on `127.0.0.1` and passes those host ports into the container as `AGENT_TOOLS_PUBLIC_HANDOFF_PORT` and `AGENT_TOOLS_PUBLIC_NOVNC_PORT`. The posted URL and the noVNC frame use those published ports. The process inside the container still binds `8765` and `8766`.
+
+Set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT` to pin a published port. Leave them unset to let the launcher pick a free port. An empty value, `0`, and `auto` also pick a free port.
 
 ### Install the listener
 
@@ -136,7 +140,7 @@ command = "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser"
 startup_timeout_sec = 120
 ```
 
-`startup_timeout_sec` gives Xvfb and Chromium time to come up on a cold start. The same path works with `grok mcp add browser -- __REPO_ROOT__/runtimes/browser/bin/agent-tools-browser`. Put no secret values in this file. Set `AGENT_TOOLS_CONTAINER_ENGINE` in the server environment when the automatic choice is wrong.
+`startup_timeout_sec` gives Xvfb and Chromium time to come up on a cold start. The same path works with `grok mcp add browser -- __REPO_ROOT__/runtimes/browser/bin/agent-tools-browser`. Put no secret values in this file. Set `AGENT_TOOLS_CONTAINER_ENGINE` in the server environment when the automatic choice is wrong. The example leaves the handoff ports unset. Set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT` only when you want to pin a published port. An empty value, `0`, and `auto` also pick a free port.
 
 ### Register with Claude Code
 
@@ -176,6 +180,8 @@ The user file is `~/.omp/agent/mcp.json`. A project file `.omp/mcp.json` uses th
 }
 ```
 
+The example leaves the handoff ports unset. Set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT` only when you want to pin a published port. An empty value, `0`, and `auto` also pick a free port. The container still listens on `8765` and `8766`.
+
 ### Smoke test
 
 On a machine with podman or docker:
@@ -192,7 +198,7 @@ uv run --project runtimes/browser python runtimes/browser/contrib/smoke_containe
 uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q
 ```
 
-The behavior tests use a local HTTP server and a local webhook. They do not use the internet. They run once with the default system Chrome channel and once with `AGENT_TOOLS_BROWSER_CHANNEL=chromium`. Install bundled Chromium before that second run. A separate test sets fixed handoff and noVNC ports, binds `0.0.0.0`, and checks that the posted URL uses `AGENT_TOOLS_PUBLIC_HOST` and `AGENT_TOOLS_HANDOFF_PORT`.
+The behavior tests use a local HTTP server and a local webhook. They do not use the internet. They run once with the default system Chrome channel and once with `AGENT_TOOLS_BROWSER_CHANNEL=chromium`. Install bundled Chromium before that second run. A separate test sets fixed bind ports and different public ports, binds `0.0.0.0`, and checks that the posted URL uses `AGENT_TOOLS_PUBLIC_HOST` and `AGENT_TOOLS_PUBLIC_HANDOFF_PORT`. The page is fetched on the bind port. `data-novnc-port` stays the bound noVNC port, and the frame source uses the public noVNC port.
 
 The macOS listener test stubs `osascript` and `open`. It does not need macOS.
 

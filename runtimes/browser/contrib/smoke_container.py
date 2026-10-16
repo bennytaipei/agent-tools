@@ -18,7 +18,6 @@ import asyncio
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import threading
@@ -66,7 +65,6 @@ def main(argv: list[str] | None = None) -> int:
             print("no container engine available; smoke test not run", file=sys.stderr)
         return 2
     volume = f"agent-tools-browser-smoke-{os.getpid()}"
-    handoff, novnc = _two_free_ports()
     site = _start_site()
     try:
         url = f"http://{plan.alias}:{site.server_address[1]}/landed"
@@ -75,8 +73,13 @@ def main(argv: list[str] | None = None) -> int:
             env["AGENT_TOOLS_CONTAINER_ENGINE"] = plan.command
         env["AGENT_TOOLS_IMAGE"] = IMAGE
         env["AGENT_TOOLS_PROFILE_VOLUME"] = volume
-        env["AGENT_TOOLS_HANDOFF_PORT"] = str(handoff)
-        env["AGENT_TOOLS_NOVNC_PORT"] = str(novnc)
+        for name in (
+            "AGENT_TOOLS_HANDOFF_PORT",
+            "AGENT_TOOLS_NOVNC_PORT",
+            "AGENT_TOOLS_PUBLIC_HANDOFF_PORT",
+            "AGENT_TOOLS_PUBLIC_NOVNC_PORT",
+        ):
+            env.pop(name, None)
         env["AGENT_TOOLS_NOTIFY_WEBHOOK"] = "http://127.0.0.1:9/unused"
         built = subprocess.run(
             [str(LAUNCHER), "--build"],
@@ -146,19 +149,6 @@ def _docker_is_podman_shim() -> bool:
         check=False,
     )
     return "podman" in (info.stdout or "").lower()
-
-
-def _two_free_ports() -> tuple[int, int]:
-    sockets = []
-    ports: list[int] = []
-    for _ in range(2):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("127.0.0.1", 0))
-        ports.append(sock.getsockname()[1])
-        sockets.append(sock)
-    for sock in sockets:
-        sock.close()
-    return ports[0], ports[1]
 
 
 def _start_site() -> ThreadingHTTPServer:

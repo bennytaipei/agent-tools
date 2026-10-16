@@ -37,6 +37,8 @@ NOVNC_WEB = "/usr/share/novnc"
 WEBHOOK_ENV = "AGENT_TOOLS_NOTIFY_WEBHOOK"
 HANDOFF_PORT_ENV = "AGENT_TOOLS_HANDOFF_PORT"
 NOVNC_PORT_ENV = "AGENT_TOOLS_NOVNC_PORT"
+PUBLIC_HANDOFF_PORT_ENV = "AGENT_TOOLS_PUBLIC_HANDOFF_PORT"
+PUBLIC_NOVNC_PORT_ENV = "AGENT_TOOLS_PUBLIC_NOVNC_PORT"
 BIND_ENV = "AGENT_TOOLS_BIND_ADDRESS"
 PUBLIC_HOST_ENV = "AGENT_TOOLS_PUBLIC_HOST"
 _HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
@@ -57,13 +59,18 @@ class ListenSettings:
     bind_host is the address inside this process (0.0.0.0 in a container).
     public_host is the host in the URL posted to the webhook and in the page's
     noVNC iframe. Benny opens that URL on the Mac, so it is the published host,
-    which defaults to 127.0.0.1. Unset ports stay ephemeral.
+    which defaults to 127.0.0.1. Unset bind ports stay ephemeral.
+    public_page_port and public_novnc_port are the published host ports when
+    they differ from the ports this process binds. Unset means the URL and the
+    iframe use the bound ports.
     """
 
     bind_host: str
     public_host: str
     page_port: int | None
     novnc_port: int | None
+    public_page_port: int | None
+    public_novnc_port: int | None
 
 
 def listen_settings() -> ListenSettings:
@@ -72,6 +79,8 @@ def listen_settings() -> ListenSettings:
         public_host=_host_value(PUBLIC_HOST_ENV, "127.0.0.1"),
         page_port=_optional_port(HANDOFF_PORT_ENV),
         novnc_port=_optional_port(NOVNC_PORT_ENV),
+        public_page_port=_optional_port(PUBLIC_HANDOFF_PORT_ENV),
+        public_novnc_port=_optional_port(PUBLIC_NOVNC_PORT_ENV),
     )
 
 
@@ -107,6 +116,8 @@ class HandoffShare:
         self._bind_host = "127.0.0.1"
         self._public_host = "127.0.0.1"
         self._page_port_pref: int | None = None
+        self._public_page_port: int | None = None
+        self._public_novnc_port: int | None = None
 
     def start(self) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
@@ -115,6 +126,8 @@ class HandoffShare:
             self._bind_host = settings.bind_host
             self._public_host = settings.public_host
             self._page_port_pref = settings.page_port
+            self._public_page_port = settings.public_page_port
+            self._public_novnc_port = settings.public_novnc_port
             self.vnc_port = _free_port()
             self.novnc_port = settings.novnc_port if settings.novnc_port is not None else _free_port()
             self._start_x11vnc()
@@ -206,13 +219,15 @@ class HandoffShare:
         wait_until_listening(self.novnc_port, tracked, host=probe_host(self._bind_host))
 
     def _start_page(self) -> None:
-        html = _page(self._token, self.novnc_port, self._public_host)
+        iframe_port = self.novnc_port if self._public_novnc_port is None else self._public_novnc_port
+        html = _page(self._token, iframe_port, self.novnc_port, self._public_host)
         handler = _handler_class(self._token, html, self._accept)
         page_port = 0 if self._page_port_pref is None else self._page_port_pref
         httpd = _ReuseHTTPServer((self._bind_host, page_port), handler)
         httpd.daemon_threads = True
         self.page_port = httpd.server_address[1]
-        self.url = f"http://{self._public_host}:{self.page_port}/h/{self._token}"
+        public_page = self.page_port if self._public_page_port is None else self._public_page_port
+        self.url = f"http://{self._public_host}:{public_page}/h/{self._token}"
         self._httpd = httpd
         self._thread = threading.Thread(target=httpd.serve_forever, name="handoff-http", daemon=True)
         self._thread.start()
@@ -315,9 +330,9 @@ def _optional_port(name: str) -> int | None:
     return port
 
 
-def _page(token: str, novnc_port: int, public_host: str) -> bytes:
+def _page(token: str, iframe_port: int, bound_novnc_port: int, public_host: str) -> bytes:
     iframe = (
-        f"http://{public_host}:{novnc_port}/vnc.html?autoconnect=1&resize=scale"
+        f"http://{public_host}:{iframe_port}/vnc.html?autoconnect=1&resize=scale"
         f"&path=websockify%3Ftoken%3D{token}"
     )
     html = f"""<!DOCTYPE html>
@@ -333,7 +348,7 @@ def _page(token: str, novnc_port: int, public_host: str) -> bytes:
   </style>
 </head>
 <body>
-  <div class="bar" data-novnc-port="{novnc_port}">
+  <div class="bar" data-novnc-port="{bound_novnc_port}">
     <form method="post" action="/h/{token}/done"><button type="submit">Done</button></form>
     <form method="post" action="/h/{token}/cancel"><button type="submit">Cancel</button></form>
   </div>
