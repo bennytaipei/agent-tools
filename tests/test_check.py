@@ -99,7 +99,17 @@ def test_repo_catalog():
 def test_browser_manifests():
     folder = REPO / "catalog" / "browser"
     files = sorted(path.name for path in folder.glob("*.yaml"))
-    assert files == ["handoff.yaml", "navigate.yaml", "read.yaml", "screenshot.yaml"]
+    assert files == [
+        "click.yaml",
+        "handoff.yaml",
+        "navigate.yaml",
+        "read.yaml",
+        "screenshot.yaml",
+        "scroll.yaml",
+        "select.yaml",
+        "type.yaml",
+        "wait_for.yaml",
+    ]
     manifests = {
         name: yaml.safe_load((folder / name).read_text(encoding="utf-8")) for name in files
     }
@@ -112,6 +122,26 @@ def test_browser_manifests():
     assert manifests["navigate.yaml"]["version"] == "1.0.0"
     assert manifests["screenshot.yaml"]["version"] == "1.0.0"
     assert manifests["handoff.yaml"]["version"] == "1.0.0"
+    for name in ("click.yaml", "type.yaml", "scroll.yaml", "select.yaml", "wait_for.yaml"):
+        assert manifests[name]["version"] == "1.0.0"
+        assert manifests[name]["auth_needed"] == ["browser_session"]
+        assert [item["code"] for item in manifests[name]["errors"]] == [
+            "not_found",
+            "ambiguous",
+            "not_interactable",
+            "timeout",
+            "invalid_target",
+            "no_session",
+        ]
+        assert manifests[name]["outputs"]["required"] == [
+            "url",
+            "title",
+            "scroll_y",
+            "viewport",
+            "image",
+        ]
+    assert manifests["wait_for.yaml"]["side_effects"].startswith("None.")
+    assert "should" not in manifests["click.yaml"]["when_to_use"]
     read_inputs = manifests["read.yaml"]["inputs"]["properties"]["max_viewports"]
     assert read_inputs["type"] == "integer"
     assert read_inputs["minimum"] == 1

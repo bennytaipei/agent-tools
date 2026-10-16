@@ -12,6 +12,11 @@ TOOL_NAMES = (
     "browser.read",
     "browser.screenshot",
     "browser.handoff",
+    "browser.click",
+    "browser.type",
+    "browser.scroll",
+    "browser.select",
+    "browser.wait_for",
 )
 
 _FILENAMES = {
@@ -19,6 +24,11 @@ _FILENAMES = {
     "browser.read": "read.yaml",
     "browser.screenshot": "screenshot.yaml",
     "browser.handoff": "handoff.yaml",
+    "browser.click": "click.yaml",
+    "browser.type": "type.yaml",
+    "browser.scroll": "scroll.yaml",
+    "browser.select": "select.yaml",
+    "browser.wait_for": "wait_for.yaml",
 }
 
 

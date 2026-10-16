@@ -1,0 +1,157 @@
+name: browser.scroll
+version: 1.0.0
+when_to_use: Scroll the current page or a container. target scrolls that element into view, or scrolls that container when delta or to is set.
+inputs:
+  type: object
+  additionalProperties: false
+  properties:
+    target:
+      description: Element to scroll into view, or the container to scroll when delta or to is set. A locator, or a point in viewport CSS pixels.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - role
+          properties:
+            role:
+              type: string
+              minLength: 1
+              description: ARIA role for Playwright get_by_role.
+            name:
+              type: string
+              minLength: 1
+              description: Accessible name for get_by_role.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+        - type: object
+          additionalProperties: false
+          required:
+            - text
+          properties:
+            text:
+              type: string
+              minLength: 1
+              description: Text for Playwright get_by_text.
+            exact:
+              type: boolean
+              description: When true, get_by_text matches the whole string.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+        - type: object
+          additionalProperties: false
+          required:
+            - css
+          properties:
+            css:
+              type: string
+              minLength: 1
+              description: CSS selector for Playwright locator.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+        - type: object
+          additionalProperties: false
+          required:
+            - x
+            - y
+          properties:
+            x:
+              type: number
+              description: Horizontal viewport CSS pixel.
+            y:
+              type: number
+              description: Vertical viewport CSS pixel.
+            scroll_y:
+              type: integer
+              minimum: 0
+              description: Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y.
+    delta:
+      type: object
+      additionalProperties: false
+      description: Scroll by this many CSS pixels.
+      required:
+        - dx
+        - dy
+      properties:
+        dx:
+          type: number
+          description: Horizontal scroll delta in CSS pixels.
+        dy:
+          type: number
+          description: Vertical scroll delta in CSS pixels.
+    to:
+      type: string
+      enum:
+        - top
+        - bottom
+      description: Scroll to the top or the bottom of the page or target container.
+  anyOf:
+    - required:
+        - target
+    - required:
+        - delta
+    - required:
+        - to
+outputs:
+  type: object
+  additionalProperties: false
+  required:
+    - url
+    - title
+    - scroll_y
+    - viewport
+    - image
+  properties:
+    url:
+      type: string
+      format: uri
+      description: URL of the page after scrolling.
+    title:
+      type: string
+      description: Document title after scrolling.
+    scroll_y:
+      type: integer
+      minimum: 0
+      description: Scroll offset of the scroller that moved, in CSS pixels.
+    viewport:
+      type: object
+      additionalProperties: false
+      description: Viewport size in CSS pixels.
+      required:
+        - width
+        - height
+      properties:
+        width:
+          type: integer
+          minimum: 1
+          description: Viewport width in CSS pixels.
+        height:
+          type: integer
+          minimum: 1
+          description: Viewport height in CSS pixels.
+    image:
+      type: string
+      contentMediaType: image/png
+      contentEncoding: base64
+      description: PNG screenshot of the viewport after scrolling.
+side_effects: Scrolls the page or the target container in the remote browser.
+errors:
+  - code: not_found
+    when: The locator matched no element.
+  - code: ambiguous
+    when: The locator matched more than one element and nth was not set.
+  - code: not_interactable
+    when: The element is present and cannot be scrolled.
+  - code: timeout
+    when: The scroll did not finish before its timeout.
+  - code: invalid_target
+    when: The target or the other inputs do not describe a scroll this tool can perform.
+  - code: no_session
+    when: The remote browser has no page.
+auth_needed:
+  - browser_session

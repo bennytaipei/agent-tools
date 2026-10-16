@@ -52,7 +52,17 @@ CATALOG = REPO / "catalog" / "browser"
 MARKER = "AGENT_TOOLS_MARKER"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 _MCP_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-EXPOSED_NAMES = ("navigate", "read", "screenshot", "handoff")
+EXPOSED_NAMES = (
+    "navigate",
+    "read",
+    "screenshot",
+    "handoff",
+    "click",
+    "type",
+    "scroll",
+    "select",
+    "wait_for",
+)
 _BY_EXPOSED = {mcp_tool_name(name): name for name in CATALOG_NAMES}
 
 
@@ -847,3 +857,184 @@ async def _assert_scroll_restored(client: Client, port: int, path: str) -> None:
     after = _payload(await _call(client, "screenshot", {}))
     restored = _png_center_rgb(base64.b64decode(after["image"]))
     assert _near(restored, _GREEN), (path, restored)
+
+
+def _assert_action_image(result, payload: dict, action: str) -> None:
+    assert len(result.content) == 3
+    assert result.content[0].type == "text"
+    assert json.loads(result.content[0].text) == payload
+    label = result.content[1]
+    image = result.content[2]
+    assert label.type == "text"
+    assert label.text == f"after {action}, scroll_y {payload['scroll_y']}"
+    assert image.type == "image"
+    assert image.mime_type == "image/png"
+    assert image.data == payload["image"]
+    raw = base64.b64decode(image.data, validate=True)
+    assert raw.startswith(PNG_MAGIC)
+
+
+def test_page_interactions(tmp_path: Path) -> None:
+    asyncio.run(_page_interactions(tmp_path))
+
+
+async def _page_interactions(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    state = profile.parent / f"{profile.name}.runtime"
+    markers = [str(profile.resolve()), str(state.resolve())]
+    html = (REPO / "tests" / "fixtures" / "browser_interact" / "page.html").read_bytes()
+    site = _start_pages({"/interact": html})
+    port = site.server_address[1]
+    url = f"http://127.0.0.1:{port}/interact"
+    try:
+        async with _client(profile, None) as client:
+            await _assert_no_session(client)
+            await _call(client, "navigate", {"url": url})
+            await _assert_interaction_errors(client)
+            await _assert_interaction_actions(client, url)
+    finally:
+        site.shutdown()
+        site.server_close()
+        reap(markers)
+
+
+async def _assert_no_session(client: Client) -> None:
+    calls = (
+        ("click", {"target": {"css": "#open"}}),
+        ("type", {"text": "Ada"}),
+        ("scroll", {"to": "top"}),
+        ("select", {"target": {"css": "#color"}, "label": "Red"}),
+        ("wait_for", {"load_state": "load", "timeout_ms": 500}),
+    )
+    for name, arguments in calls:
+        result = await _call(client, name, arguments)
+        code = _error_code(result)
+        assert code == "no_session", name
+        _assert_declared(_BY_EXPOSED[name], code)
+
+
+async def _assert_interaction_errors(client: Client) -> None:
+    cases = (
+        ("scroll", {}, "invalid_target"),
+        ("click", {"target": {"css": "#missing"}}, "not_found"),
+        ("click", {"target": {"css": ".twin"}}, "ambiguous"),
+        ("click", {"target": {"css": "#disabled"}}, "not_interactable"),
+        ("select", {"target": {"css": "#not-select"}, "value": "red"}, "invalid_target"),
+        ("click", {"target": {"x": -5, "y": 10}}, "invalid_target"),
+        (
+            "wait_for",
+            {"target": {"css": "#no-such"}, "state": "visible", "timeout_ms": 300},
+            "timeout",
+        ),
+    )
+    for name, arguments, expected in cases:
+        result = await _call(client, name, arguments)
+        code = _error_code(result)
+        assert code == expected, (name, arguments, code)
+        _assert_declared(_BY_EXPOSED[name], code)
+
+    chosen = await _ok(client, "click", {"target": {"css": ".twin", "nth": 1}})
+    assert chosen["title"] == "twin-1"
+
+
+async def _assert_interaction_actions(client: Client, url: str) -> None:
+    await _call(client, "navigate", {"url": url})
+    opened = await _ok(client, "click", {"target": {"role": "button", "name": "Open panel"}})
+    assert opened["title"] == "panel-open"
+    assert opened["url"].endswith("/interact")
+    assert opened["scroll_y"] == 0
+    assert opened["viewport"]["width"] == 1280
+    assert opened["viewport"]["height"] == 800
+    visible = await _ok(
+        client,
+        "wait_for",
+        {"text": "PANEL_OPEN", "timeout_ms": 2000},
+    )
+    assert visible["title"] == "panel-open"
+
+    await _call(client, "navigate", {"url": url})
+    pointed = await _ok(client, "click", {"target": {"x": 100, "y": 40}})
+    assert pointed["title"] == "panel-open"
+
+    await _call(client, "navigate", {"url": url})
+    below = await _ok(
+        client,
+        "click",
+        {"target": {"x": 100, "y": 440, "scroll_y": 2000}},
+    )
+    assert below["title"] == "below-clicked"
+    assert below["scroll_y"] >= 1900
+
+    await _call(client, "navigate", {"url": url})
+    await _ok(client, "click", {"target": {"role": "button", "name": "Open panel"}})
+    typed = await _ok(
+        client,
+        "type",
+        {"target": {"css": "#name"}, "text": "Ada", "clear": True, "press_enter": True},
+    )
+    assert typed["title"] == "typed:Ada|ENTER"
+    focused = await _ok(client, "click", {"target": {"css": "#name"}})
+    assert focused["title"] == "typed:Ada|ENTER"
+    more = await _ok(client, "type", {"text": "Z"})
+    assert more["title"] == "typed:AdaZ"
+
+    selected = await _ok(
+        client,
+        "select",
+        {"target": {"css": "#color"}, "label": "Green"},
+    )
+    assert selected["title"] == "selected:green"
+    by_index = await _ok(client, "select", {"target": {"css": "#color"}, "index": 2})
+    assert by_index["title"] == "selected:blue"
+    by_value = await _ok(client, "select", {"target": {"css": "#color"}, "value": "red"})
+    assert by_value["title"] == "selected:red"
+
+    bottom = await _ok(client, "scroll", {"to": "bottom"})
+    assert bottom["scroll_y"] > 2000
+    top = await _ok(client, "scroll", {"to": "top"})
+    assert top["scroll_y"] == 0
+    delta = await _ok(client, "scroll", {"delta": {"dx": 0, "dy": 500}})
+    assert 400 <= delta["scroll_y"] <= 700
+    await _ok(client, "scroll", {"to": "top"})
+    inner = await _ok(client, "scroll", {"target": {"css": "#scroller"}, "to": "bottom"})
+    assert inner["scroll_y"] >= 800
+    inner_top = await _ok(client, "scroll", {"target": {"css": "#scroller"}, "to": "top"})
+    assert inner_top["scroll_y"] == 0
+
+    await _call(client, "navigate", {"url": url})
+    late = await _ok(
+        client,
+        "wait_for",
+        {"target": {"css": "#late"}, "state": "visible", "timeout_ms": 4000},
+    )
+    assert "LATE_READY" in late["title"] or late["url"].endswith("/interact")
+    text_wait = await _ok(client, "wait_for", {"text": "LATE_READY", "timeout_ms": 2000})
+    assert text_wait["url"].endswith("/interact")
+    url_wait = await _ok(
+        client,
+        "wait_for",
+        {"url_matches": r"/interact$", "timeout_ms": 2000},
+    )
+    assert url_wait["url"].endswith("/interact")
+    loaded = await _ok(client, "wait_for", {"load_state": "load", "timeout_ms": 2000})
+    assert loaded["url"].endswith("/interact")
+    hidden = await _ok(
+        client,
+        "wait_for",
+        {"target": {"css": "#ghost"}, "state": "hidden", "timeout_ms": 2000},
+    )
+    assert hidden["url"].endswith("/interact")
+
+    await _call(client, "navigate", {"url": url})
+    right = await _ok(client, "click", {"target": {"css": "#open"}, "button": "right"})
+    assert right["title"] == "right-click"
+
+
+async def _ok(client: Client, name: str, arguments: dict) -> dict:
+    result = await _call(client, name, arguments)
+    assert result.is_error is False, _error_code(result) if result.is_error else result
+    payload = _payload(result)
+    _assert_output(_BY_EXPOSED[name], payload)
+    _assert_action_image(result, payload, name)
+    return payload

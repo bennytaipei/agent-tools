@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Interact</title>
+  <style>
+    html, body { margin: 0; padding: 0; }
+    body { padding-top: 96px; }
+    #open {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 200px;
+      height: 80px;
+      z-index: 2;
+    }
+    #panel { display: none; margin: 96px 0 0 0; }
+    #scroller {
+      height: 100px;
+      width: 240px;
+      overflow: auto;
+      margin-top: 16px;
+    }
+    #scroller-body { height: 900px; background: #ff0000; }
+    #scroller-end { height: 100px; background: #0000ff; }
+    #spacer { height: 3600px; }
+    #below {
+      position: absolute;
+      left: 0;
+      top: 2400px;
+      width: 200px;
+      height: 80px;
+      z-index: 2;
+    }
+    #ghost { display: none; }
+    #late { display: none; }
+  </style>
+</head>
+<body>
+  <button id="open" type="button">Open panel</button>
+  <div id="panel">
+    <p id="panel-body">PANEL_OPEN</p>
+    <label>Your name <input id="name"></label>
+    <label>Color
+      <select id="color">
+        <option value="red">Red</option>
+        <option value="green">Green</option>
+        <option value="blue">Blue</option>
+      </select>
+    </label>
+  </div>
+  <button id="disabled" type="button" disabled>Disabled</button>
+  <button class="twin" id="twin-a" type="button">Twin</button>
+  <button class="twin" id="twin-b" type="button">Twin</button>
+  <div id="not-select">not a select</div>
+  <div id="scroller">
+    <div id="scroller-body"></div>
+    <div id="scroller-end"></div>
+  </div>
+  <p id="marker-top">TOP_MARKER</p>
+  <div id="spacer"></div>
+  <button id="below" type="button">Below button</button>
+  <p id="below-text">BELOW_THE_FOLD</p>
+  <p id="ghost">GHOST</p>
+  <p id="late">LATE_READY</p>
+  <script>
+    function setTitle(value) { document.title = value; }
+    document.getElementById("open").addEventListener("click", function () {
+      var panel = document.getElementById("panel");
+      panel.style.display = "block";
+      setTitle("panel-open");
+    });
+    document.getElementById("open").addEventListener("contextmenu", function (event) {
+      event.preventDefault();
+      setTitle("right-click");
+    });
+    var nameInput = document.getElementById("name");
+    nameInput.addEventListener("input", function () { setTitle("typed:" + nameInput.value); });
+    nameInput.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") setTitle("typed:" + nameInput.value + "|ENTER");
+    });
+    document.getElementById("color").addEventListener("change", function (event) {
+      setTitle("selected:" + event.target.value);
+    });
+    document.getElementById("below").addEventListener("click", function () {
+      setTitle("below-clicked");
+    });
+    document.getElementById("twin-a").addEventListener("click", function () { setTitle("twin-0"); });
+    document.getElementById("twin-b").addEventListener("click", function () { setTitle("twin-1"); });
+    setTimeout(function () {
+      var late = document.getElementById("late");
+      late.style.display = "block";
+    }, 800);
+  </script>
+</body>
+</html>

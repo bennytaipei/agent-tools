@@ -40,13 +40,14 @@ def declared_codes(manifest: dict) -> list[str]:
 def input_failure_code(manifest: dict) -> str:
     """Map a schema rejection to a code this manifest already declares.
 
-    navigate's input is the URL, so a bad input is invalid_url. handoff cannot
-    start a share from arguments the schema rejects, so that is share_failed.
-    read and screenshot declare only no_page.
+    navigate's input is the URL, so a bad input is invalid_url. Interaction
+    tools reject a target the schema does not describe as invalid_target.
+    handoff cannot start a share from arguments the schema rejects, so that
+    is share_failed. read and screenshot declare only no_page.
     """
 
     codes = declared_codes(manifest)
-    for preferred in ("invalid_url", "share_failed", "no_page"):
+    for preferred in ("invalid_target", "invalid_url", "share_failed", "no_page"):
         if preferred in codes:
             return preferred
     if not codes:
@@ -58,7 +59,7 @@ def operation_failure_code(manifest: dict) -> str:
     """A declared code for an unexpected failure while performing the call."""
 
     codes = declared_codes(manifest)
-    for preferred in ("navigation_failed", "share_failed", "no_page", "notify_failed"):
+    for preferred in ("navigation_failed", "share_failed", "not_interactable", "no_page", "notify_failed"):
         if preferred in codes:
             return preferred
     return input_failure_code(manifest)

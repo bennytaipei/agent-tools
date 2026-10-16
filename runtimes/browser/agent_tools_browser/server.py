@@ -120,6 +120,16 @@ class BrowserRuntime:
             return await self._browser.screenshot()
         if name == "browser.handoff":
             return await self._browser.handoff(str(arguments["reason"]), int(arguments["timeout"]))
+        if name == "browser.click":
+            return await self._browser.click(arguments)
+        if name == "browser.type":
+            return await self._browser.type_text(arguments)
+        if name == "browser.scroll":
+            return await self._browser.scroll(arguments)
+        if name == "browser.select":
+            return await self._browser.select(arguments)
+        if name == "browser.wait_for":
+            return await self._browser.wait_for(arguments)
         raise ValueError(name)
 
 
@@ -142,6 +152,19 @@ def _result_images(name: str, payload: dict) -> list[tuple[str, str]]:
         if isinstance(image, str):
             return [("", image)]
         return []
+    action = {
+        "browser.click": "click",
+        "browser.type": "type",
+        "browser.scroll": "scroll",
+        "browser.select": "select",
+        "browser.wait_for": "wait_for",
+    }.get(name)
+    if action is not None:
+        image = payload.get("image")
+        if not isinstance(image, str):
+            return []
+        scroll_y = payload.get("scroll_y", 0)
+        return [(f"after {action}, scroll_y {int(scroll_y)}", image)]
     if name != "browser.read":
         return []
     viewports = payload.get("viewports")

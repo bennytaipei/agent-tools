@@ -1,6 +1,6 @@
 # Browser runtime
 
-Reference MCP server for the four browser tools. The manifests in `catalog/browser/` are the contract. This package loads each tool's name, description, and schemas from those files at startup.
+Reference MCP server for the browser tools. The manifests in `catalog/browser/` are the contract. This package loads each tool's name, description, and schemas from those files at startup.
 
 The server speaks MCP over stdio. A remote agent drives one headed Chrome session. On a login wall it calls `handoff`. Benny opens the returned URL, uses the same live browser through noVNC, and presses Done or Cancel.
 
@@ -47,7 +47,7 @@ Point the MCP client at the stdio command above. Put `AGENT_TOOLS_BROWSER_PROFIL
 
 Add `AGENT_TOOLS_BROWSER_PROFILE` and `AGENT_TOOLS_NOTIFY_WEBHOOK` to that server's environment in the host that launches the harness. Do not commit the values.
 
-The MCP tool names are `navigate`, `read`, `screenshot`, and `handoff`. Each one is the tool segment of the catalog manifest name (`browser.navigate` and the rest stay fully qualified in `catalog/browser/`). Register this server as `browser` so that server name is the namespace. Grok Build and Claude Code admit only letters, digits, underscores, and hyphens in a tool name. Inputs that fail the manifest schema, and results that fail it, come back as that tool's declared error codes.
+The MCP tool names are `navigate`, `read`, `screenshot`, `handoff`, `click`, `type`, `scroll`, `select`, and `wait_for`. Each one is the tool segment of the catalog manifest name (`browser.navigate` and the rest stay fully qualified in `catalog/browser/`). Register this server as `browser` so that server name is the namespace. Grok Build and Claude Code admit only letters, digits, underscores, and hyphens in a tool name. Inputs that fail the manifest schema, and results that fail it, come back as that tool's declared error codes.
 
 ## Run in a container
 
@@ -184,7 +184,7 @@ On a machine with podman or docker:
 uv run --project runtimes/browser python runtimes/browser/contrib/smoke_container.py --engine podman
 ```
 
-`--engine docker` selects Docker. Omit `--engine` to use the launcher's automatic choice. The script runs `runtimes/browser/bin/agent-tools-browser --build`, then starts `runtimes/browser/bin/agent-tools-browser` with no arguments. It checks MCP initialize and tools/list for `navigate`, `read`, `screenshot`, and `handoff`, and calls `navigate` on a page served from the host. It exits 2 when the requested engine is not on PATH, or when neither engine is available. It removes only the container and the profile volume it started.
+`--engine docker` selects Docker. Omit `--engine` to use the launcher's automatic choice. The script runs `runtimes/browser/bin/agent-tools-browser --build`, then starts `runtimes/browser/bin/agent-tools-browser` with no arguments. It checks MCP initialize and tools/list for `navigate`, `read`, `screenshot`, `handoff`, `click`, `type`, `scroll`, `select`, and `wait_for`, and calls `navigate` on a page served from the host. It exits 2 when the requested engine is not on PATH, or when neither engine is available. It removes only the container and the profile volume it started.
 
 ## Tests
 

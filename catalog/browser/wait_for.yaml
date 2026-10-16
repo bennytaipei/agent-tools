@@ -1,0 +1,170 @@
+name: browser.wait_for
+version: 1.0.0
+when_to_use: Wait until the current page shows a locator, hides a locator, contains text, matches a URL, or reaches a load state.
+inputs:
+  type: object
+  additionalProperties: false
+  properties:
+    target:
+      description: Locator to wait for. Use with state.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - role
+          properties:
+            role:
+              type: string
+              minLength: 1
+              description: ARIA role for Playwright get_by_role.
+            name:
+              type: string
+              minLength: 1
+              description: Accessible name for get_by_role.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+        - type: object
+          additionalProperties: false
+          required:
+            - text
+          properties:
+            text:
+              type: string
+              minLength: 1
+              description: Text for Playwright get_by_text.
+            exact:
+              type: boolean
+              description: When true, get_by_text matches the whole string.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+        - type: object
+          additionalProperties: false
+          required:
+            - css
+          properties:
+            css:
+              type: string
+              minLength: 1
+              description: CSS selector for Playwright locator.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+    state:
+      type: string
+      enum:
+        - visible
+        - hidden
+      description: Wait until the locator is visible or hidden.
+    text:
+      type: string
+      minLength: 1
+      description: Wait until this text is present.
+    url_matches:
+      type: string
+      minLength: 1
+      description: Regular expression matched against the page URL.
+    load_state:
+      type: string
+      enum:
+        - load
+        - domcontentloaded
+        - networkidle
+      description: Playwright load state to wait for.
+    timeout_ms:
+      type: integer
+      minimum: 0
+      maximum: 120000
+      default: 10000
+      description: How long to wait, in milliseconds. Defaults to 10000.
+  oneOf:
+    - required:
+        - target
+        - state
+      properties:
+        text: false
+        url_matches: false
+        load_state: false
+    - required:
+        - text
+      properties:
+        target: false
+        state: false
+        url_matches: false
+        load_state: false
+    - required:
+        - url_matches
+      properties:
+        target: false
+        state: false
+        text: false
+        load_state: false
+    - required:
+        - load_state
+      properties:
+        target: false
+        state: false
+        text: false
+        url_matches: false
+outputs:
+  type: object
+  additionalProperties: false
+  required:
+    - url
+    - title
+    - scroll_y
+    - viewport
+    - image
+  properties:
+    url:
+      type: string
+      format: uri
+      description: URL of the page when the wait ends.
+    title:
+      type: string
+      description: Document title when the wait ends.
+    scroll_y:
+      type: integer
+      minimum: 0
+      description: Scroll offset of the page when the wait ends, in CSS pixels.
+    viewport:
+      type: object
+      additionalProperties: false
+      description: Viewport size in CSS pixels.
+      required:
+        - width
+        - height
+      properties:
+        width:
+          type: integer
+          minimum: 1
+          description: Viewport width in CSS pixels.
+        height:
+          type: integer
+          minimum: 1
+          description: Viewport height in CSS pixels.
+    image:
+      type: string
+      contentMediaType: image/png
+      contentEncoding: base64
+      description: PNG screenshot of the viewport when the wait ends.
+side_effects: None. Waits until the page matches the requested condition or the timeout elapses. Does not navigate, click, or type.
+errors:
+  - code: not_found
+    when: The locator matched no element when the wait required one to exist already.
+  - code: ambiguous
+    when: The locator matched more than one element and nth was not set.
+  - code: not_interactable
+    when: The element is present and its visibility cannot be read.
+  - code: timeout
+    when: The condition was not met before timeout_ms elapsed.
+  - code: invalid_target
+    when: The inputs do not describe one wait this tool can perform.
+  - code: no_session
+    when: The remote browser has no page.
+auth_needed:
+  - browser_session

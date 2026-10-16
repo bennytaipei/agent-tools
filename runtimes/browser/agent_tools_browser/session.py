@@ -14,6 +14,11 @@ from pathlib import Path
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
 from agent_tools_browser.handoff import HandoffShare, NotifyError, ShareError, os_environ_webhook
+from agent_tools_browser.interact import click as interact_click
+from agent_tools_browser.interact import scroll as interact_scroll
+from agent_tools_browser.interact import select as interact_select
+from agent_tools_browser.interact import type_text as interact_type
+from agent_tools_browser.interact import wait_for as interact_wait_for
 from agent_tools_browser.processes import (
     ProcessError,
     Tracked,
@@ -268,6 +273,41 @@ class BrowserSession:
         if not isinstance(png, bytes) or not png.startswith(PNG_MAGIC):
             return "no_page"
         return {"image": base64.b64encode(png).decode("ascii")}
+
+    def _require_page(self) -> Page | str:
+        if not self._has_page or self._page is None:
+            return "no_session"
+        return self._page
+
+    async def click(self, arguments: dict) -> dict | str:
+        page = self._require_page()
+        if isinstance(page, str):
+            return page
+        return await interact_click(page, arguments)
+
+    async def type_text(self, arguments: dict) -> dict | str:
+        page = self._require_page()
+        if isinstance(page, str):
+            return page
+        return await interact_type(page, arguments)
+
+    async def scroll(self, arguments: dict) -> dict | str:
+        page = self._require_page()
+        if isinstance(page, str):
+            return page
+        return await interact_scroll(page, arguments)
+
+    async def select(self, arguments: dict) -> dict | str:
+        page = self._require_page()
+        if isinstance(page, str):
+            return page
+        return await interact_select(page, arguments)
+
+    async def wait_for(self, arguments: dict) -> dict | str:
+        page = self._require_page()
+        if isinstance(page, str):
+            return page
+        return await interact_wait_for(page, arguments)
 
     async def handoff(self, reason: str, timeout: int) -> dict | str:
         webhook = os_environ_webhook()

@@ -37,6 +37,11 @@ TOOLS = (
     "read",
     "screenshot",
     "handoff",
+    "click",
+    "type",
+    "scroll",
+    "select",
+    "wait_for",
 )
 
 

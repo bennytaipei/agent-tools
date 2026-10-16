@@ -1,0 +1,143 @@
+name: browser.type
+version: 1.0.0
+when_to_use: Type text into an element on the current page. Omit target to type into the focused element.
+inputs:
+  type: object
+  additionalProperties: false
+  required:
+    - text
+  properties:
+    target:
+      description: Element to type into. Omit it to type into the focused element. A locator, or a point in viewport CSS pixels.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required:
+            - role
+          properties:
+            role:
+              type: string
+              minLength: 1
+              description: ARIA role for Playwright get_by_role.
+            name:
+              type: string
+              minLength: 1
+              description: Accessible name for get_by_role.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+        - type: object
+          additionalProperties: false
+          required:
+            - text
+          properties:
+            text:
+              type: string
+              minLength: 1
+              description: Text for Playwright get_by_text.
+            exact:
+              type: boolean
+              description: When true, get_by_text matches the whole string.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+        - type: object
+          additionalProperties: false
+          required:
+            - css
+          properties:
+            css:
+              type: string
+              minLength: 1
+              description: CSS selector for Playwright locator.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+        - type: object
+          additionalProperties: false
+          required:
+            - x
+            - y
+          properties:
+            x:
+              type: number
+              description: Horizontal viewport CSS pixel.
+            y:
+              type: number
+              description: Vertical viewport CSS pixel.
+            scroll_y:
+              type: integer
+              minimum: 0
+              description: Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y.
+    text:
+      type: string
+      description: Text to type.
+    clear:
+      type: boolean
+      default: false
+      description: When true, replace the element's current text.
+    press_enter:
+      type: boolean
+      default: false
+      description: When true, press Enter after typing.
+outputs:
+  type: object
+  additionalProperties: false
+  required:
+    - url
+    - title
+    - scroll_y
+    - viewport
+    - image
+  properties:
+    url:
+      type: string
+      format: uri
+      description: URL of the page after typing.
+    title:
+      type: string
+      description: Document title after typing.
+    scroll_y:
+      type: integer
+      minimum: 0
+      description: Scroll offset of the page after typing, in CSS pixels.
+    viewport:
+      type: object
+      additionalProperties: false
+      description: Viewport size in CSS pixels.
+      required:
+        - width
+        - height
+      properties:
+        width:
+          type: integer
+          minimum: 1
+          description: Viewport width in CSS pixels.
+        height:
+          type: integer
+          minimum: 1
+          description: Viewport height in CSS pixels.
+    image:
+      type: string
+      contentMediaType: image/png
+      contentEncoding: base64
+      description: PNG screenshot of the viewport after typing.
+side_effects: Types text into the target, or into the focused element when target is omitted. Clears that text first when clear is true. Presses Enter when press_enter is true.
+errors:
+  - code: not_found
+    when: The locator matched no element.
+  - code: ambiguous
+    when: The locator matched more than one element and nth was not set.
+  - code: not_interactable
+    when: The element is present and cannot be typed into, or no editable element is focused.
+  - code: timeout
+    when: Typing did not finish before its timeout.
+  - code: invalid_target
+    when: The target or the other inputs do not describe typing this tool can perform.
+  - code: no_session
+    when: The remote browser has no page.
+auth_needed:
+  - browser_session
