@@ -5,13 +5,14 @@
 #   "jsonschema",
 # ]
 # ///
-"""Validate catalog manifests, the namespace index, and their layout.
+"""Validate catalog manifests, the namespace index, skill frontmatter, and layout.
 
 Run from the repo root:
 
     uv run scripts/check.py
 
 Pass a directory that contains catalog/ to validate a fixture instead of this repo.
+A root with no skills/ directory skips the skill check.
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{root}: not a directory", file=sys.stderr)
         return 1
     messages = validate_catalog(root)
+    messages.extend(validate_skills(root))
     if messages:
         print("\n".join(messages), file=sys.stderr)
         return 1
@@ -243,6 +245,57 @@ def check_nested_schemas(data: dict, label: str, messages: list[str]) -> None:
             Draft202012Validator.check_schema(schema)
         except SchemaError as exc:
             messages.append(f"{label}: {field} is not a JSON Schema: {exc.message}")
+
+
+_FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
+
+
+def validate_skills(root: Path) -> list[str]:
+    skills = root / "skills"
+    if not skills.is_dir():
+        return []
+    messages: list[str] = []
+    for child in sorted(skills.iterdir(), key=lambda path: path.name):
+        if child.name.startswith("."):
+            continue
+        rel_dir = f"skills/{child.name}"
+        if not child.is_dir():
+            messages.append(f"{rel_dir}: expected a skill directory")
+            continue
+        skill_md = child / "SKILL.md"
+        if not skill_md.is_file():
+            messages.append(f"{rel_dir}: SKILL.md not found")
+            continue
+        messages.extend(skill_frontmatter_messages(skill_md, f"{rel_dir}/SKILL.md", child.name))
+    return messages
+
+
+def skill_frontmatter_messages(path: Path, label: str, folder: str) -> list[str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"{label}: {exc}"]
+    match = _FRONTMATTER.match(text)
+    if match is None:
+        return [f"{label}: missing YAML frontmatter"]
+    try:
+        data = yaml.safe_load(match.group(1))
+    except yaml.YAMLError as exc:
+        return [f"{label}: invalid frontmatter YAML: {exc}"]
+    if not isinstance(data, dict):
+        return [f"{label}: frontmatter must be a mapping"]
+    messages: list[str] = []
+    name = data.get("name")
+    description = data.get("description")
+    if not isinstance(name, str) or not name.strip():
+        messages.append(f"{label}: frontmatter name is required")
+    elif name != folder:
+        messages.append(
+            f"{label}: frontmatter name '{name}' does not match folder '{folder}'"
+        )
+    if not isinstance(description, str) or not description.strip():
+        messages.append(f"{label}: frontmatter description is required")
+    return messages
 
 
 def record_name(data: dict, label: str, seen: dict[str, str], messages: list[str]) -> None:

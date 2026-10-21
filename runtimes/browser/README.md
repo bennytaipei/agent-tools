@@ -167,20 +167,25 @@ If the handshake times out, set `MCP_TIMEOUT` (milliseconds) in the environment 
 
 ### Register with OMP
 
-The user file is `~/.omp/agent/mcp.json`. A project file `.omp/mcp.json` uses the same shape. Replace `__REPO_ROOT__` with the absolute path of this repo:
+The user file is `~/.omp/agent/mcp.json`. A project file `.omp/mcp.json` uses the same shape. The server name is `agent_browser`, so the tools are `mcp__agent_browser_*`. Replace `__REPO_ROOT__` with the absolute path of this repo. `timeout` is milliseconds. `0` disables the client-side MCP timeout so handoff can block. `PATH` must include `podman`. Do not set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT`. `AGENT_TOOLS_NOTIFY_PORT` is optional and defaults to `8767`.
 
 ```json
 {
   "mcpServers": {
-    "browser": {
+    "agent_browser": {
       "type": "stdio",
-      "command": "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser"
+      "command": "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser",
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "AGENT_TOOLS_CONTAINER_ENGINE": "podman"
+      },
+      "timeout": 0
     }
   }
 }
 ```
 
-The example leaves the handoff ports unset. Set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT` only when you want to pin a published port. An empty value, `0`, and `auto` also pick a free port. The container still listens on `8765` and `8766`.
+The example leaves the handoff ports unset. Set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT` only when you want to pin a published port. An empty value, `0`, and `auto` also pick a free port. The container still listens on `8765` and `8766`. Paste `docs/agent-instructions/browser.md` into `~/.omp/agent/AGENTS.md`. Replace an existing `## Browser tools` section, or append the snippet. The same section goes in `~/.grok/AGENTS.md`. The rule text is `skills/browser-auth-handoff/SKILL.md`.
 
 ### Smoke test
 

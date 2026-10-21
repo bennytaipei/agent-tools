@@ -1,5 +1,7 @@
 """check.py exits non-zero and names the breakage."""
 
+import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -213,3 +215,115 @@ def test_teams_send_message_draft():
     assert "ChatMessage.Send" in manifest["when_to_use"]
     index = yaml.safe_load((REPO / "catalog" / "index.yaml").read_text(encoding="utf-8"))
     assert [entry["name"] for entry in index["namespaces"]] == ["browser", "teams"]
+
+
+def _skill_root(tmp_path: Path, body: str) -> Path:
+    root = tmp_path / "root"
+    shutil.copytree(FIXTURES / "valid", root)
+    skill = root / "skills" / "demo-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(body, encoding="utf-8")
+    return root
+
+
+def test_skill_missing_frontmatter(tmp_path: Path):
+    result = run(_skill_root(tmp_path, "# steps\n"))
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == "skills/demo-skill/SKILL.md: missing YAML frontmatter\n"
+
+
+def test_skill_name_must_match_folder(tmp_path: Path):
+    result = run(
+        _skill_root(
+            tmp_path,
+            "---\nname: other-skill\ndescription: Does a thing.\n---\n\n# Demo\n",
+        )
+    )
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "skills/demo-skill/SKILL.md: frontmatter name 'other-skill' "
+        "does not match folder 'demo-skill'\n"
+    )
+
+
+def test_skill_description_required(tmp_path: Path):
+    result = run(_skill_root(tmp_path, "---\nname: demo-skill\n---\n\n# Demo\n"))
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert result.stderr == (
+        "skills/demo-skill/SKILL.md: frontmatter description is required\n"
+    )
+
+
+def test_browser_auth_handoff_skill():
+    path = REPO / "skills" / "browser-auth-handoff" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    match = re.match(r"\A---\n(.*?)\n---\n", text, re.DOTALL)
+    assert match is not None
+    data = yaml.safe_load(match.group(1))
+    assert data["name"] == "browser-auth-handoff"
+    description = data["description"]
+    assert isinstance(description, str) and description.strip()
+    assert "401" in description
+    body = text[match.end() :]
+    for phrase in (
+        "403",
+        "mcp__agent_browser_handoff",
+        "mcp__agent_browser_navigate",
+        "done_when",
+        "url_matches",
+        "selector_present",
+        "agent browser",
+        "timeout",
+        "cancelled",
+    ):
+        assert phrase in body
+    assert "do not report the task blocked" in body.lower()
+
+
+def test_browser_instructions_snippet():
+    path = REPO / "docs" / "agent-instructions" / "browser.md"
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    assert lines[0] == "## Browser tools"
+    assert 20 <= len(lines) <= 35
+    for phrase in (
+        "401",
+        "403",
+        "do not report the task blocked",
+        "mcp__agent_browser_handoff",
+        "mcp__agent_browser_navigate",
+        "url_matches",
+        "selector_present",
+        "agent browser",
+        "timeout",
+        "cancelled",
+    ):
+        assert phrase in text
+
+
+def test_readme_registers_agents():
+    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    assert "## Registering with agents" in readme
+    assert "[mcp_servers.browser]" in readme
+    assert "agent-tools-browser" in readme
+    grok, omp_and_rest = readme.split("### OMP", 1)
+    assert "[mcp_servers.browser]" in grok
+    omp, install = omp_and_rest.split("### Browser instructions", 1)
+    fence = omp.split("```json", 1)[1].split("```", 1)[0]
+    assert '"agent_browser"' in fence
+    assert '"type": "stdio"' in fence
+    assert '"PATH"' in fence
+    assert '"AGENT_TOOLS_CONTAINER_ENGINE": "podman"' in fence
+    assert '"timeout": 0' in fence
+    assert "HANDOFF" not in fence
+    assert "NOVNC" not in fence
+    assert "NOTIFY" not in fence
+    assert "AGENT_TOOLS_NOTIFY_PORT" in readme
+    assert "## Browser tools" in install
+    assert "replace" in install.lower()
+    assert "append" in install.lower()
+    assert "~/.grok/AGENTS.md" in install
+    assert "~/.omp/agent/AGENTS.md" in install

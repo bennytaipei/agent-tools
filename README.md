@@ -53,9 +53,15 @@ uv run --with pytest --with pyyaml --with jsonschema pytest -q
 
 ## Browser runtime
 
-The reference server and the container launcher live in `runtimes/browser/`. Register `runtimes/browser/bin/agent-tools-browser` so each session publishes its own handoff ports. Replace `__REPO_ROOT__` with the absolute path of this repo.
+The reference server and the container launcher live in `runtimes/browser/`. The launcher to register is `runtimes/browser/bin/agent-tools-browser`.
 
-Grok Build, `~/.grok/config.toml`:
+## Registering with agents
+
+Replace `__REPO_ROOT__` with the absolute path of this repo. The examples below do not set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT`. Each session then publishes a free host port for the handoff page and another for noVNC. An empty value, `0`, and `auto` also pick a free port. The container still listens on `8765` and `8766`. `AGENT_TOOLS_NOTIFY_PORT` is optional. Leave it unset to keep `8767`.
+
+### Grok
+
+In `~/.grok/config.toml`, the server name is `browser` and the command is the launcher:
 
 ```toml
 [mcp_servers.browser]
@@ -63,17 +69,30 @@ command = "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser"
 startup_timeout_sec = 120
 ```
 
-OMP, `~/.omp/agent/mcp.json`:
+`startup_timeout_sec` is how long startup may take. It is not the handoff wait. Tool names on this server are `navigate`, `read`, `screenshot`, `handoff`, `click`, `type`, `scroll`, `select`, and `wait_for`.
+
+### OMP
+
+In `~/.omp/agent/mcp.json`, the server name is `agent_browser`. `type` is `stdio`. `timeout` is milliseconds, and `0` disables the client-side MCP timeout so a sign-in handoff can block until the person finishes. `env.PATH` is the path the launcher uses to find `podman`. Set `AGENT_TOOLS_CONTAINER_ENGINE` to `podman`. Do not set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT`. A project file `.omp/mcp.json` uses the same shape.
 
 ```json
 {
   "mcpServers": {
-    "browser": {
+    "agent_browser": {
       "type": "stdio",
-      "command": "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser"
+      "command": "__REPO_ROOT__/runtimes/browser/bin/agent-tools-browser",
+      "env": {
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "AGENT_TOOLS_CONTAINER_ENGINE": "podman"
+      },
+      "timeout": 0
     }
   }
 }
 ```
 
-The examples leave the ports unset. The launcher picks a free host port for the handoff page and another for noVNC. Set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT` to pin a published port. An empty value, `0`, and `auto` also pick a free port. The container still listens on `8765` and `8766`.
+OMP tool names are `mcp__agent_browser_navigate`, `mcp__agent_browser_handoff`, and the other `mcp__agent_browser_*` tools.
+
+### Browser instructions
+
+`docs/agent-instructions/browser.md` is the `## Browser tools` snippet. Paste it into `~/.grok/AGENTS.md` and `~/.omp/agent/AGENTS.md`. If a `## Browser tools` section is already in the file, replace that section. If it is not, append the snippet. The rule text is `skills/browser-auth-handoff/SKILL.md`.
