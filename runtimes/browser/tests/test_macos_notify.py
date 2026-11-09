@@ -5,10 +5,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import re
+import shutil
 import subprocess
 import threading
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -54,6 +57,11 @@ class _Calls:
 
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         self.commands.append(list(args))
+        if args and args[0] == "ioreg":
+            body = plistlib.dumps([{"CGSSessionScreenIsLocked": False}])
+            return subprocess.CompletedProcess(args, 0, body, b"")
+        if args and args[0] == "lsappinfo":
+            return subprocess.CompletedProcess(args, 0, b"Safari\n", b"")
         code = self.codes.pop(0) if self.codes else 0
         stderr = self.stderrs.pop(0) if self.stderrs else b""
         stdout = b""
@@ -120,9 +128,11 @@ def test_post_notifies_and_opens(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "with timeout of 3 seconds" in verify[2]
     assert 'tell application "System Events"' in verify[2]
     assert 'tell application "Safari"' not in verify[2]
+    assert "set kind to" not in verify[2]
     assert verify[-1] == "Safari"
     assert calls.commands == [
         macos_notify.notification_command(reason),
+        ["ioreg", "-n", "Root", "-d1", "-a"],
         ["open", "-b", "com.apple.safari", url],
         ["open", "-b", "com.apple.safari"],
         verify,
@@ -232,8 +242,9 @@ def test_post_opens_default_bundle_and_logs(monkeypatch: pytest.MonkeyPatch, cap
     assert calls.commands[0][0] == "osascript"
     assert "Browser handoff" in calls.commands[0][2]
     assert reason in calls.commands[0]
-    assert calls.commands[1] == ["open", "-b", "com.example.browser", url]
-    assert calls.commands[2] == ["open", "-b", "com.example.browser"]
+    opens = [cmd for cmd in calls.commands if cmd and cmd[0] == "open"]
+    assert opens[0] == ["open", "-b", "com.example.browser", url]
+    assert opens[1] == ["open", "-b", "com.example.browser"]
     err = capfd.readouterr().err
     assert url in err
     assert "exit=0" in err
@@ -262,8 +273,9 @@ def test_activation_failure_logs_stderr_without_a_dialog(
         httpd.shutdown()
         httpd.server_close()
     assert status == 204
-    assert calls.commands[1] == ["open", "-b", "com.example.browser", url]
-    assert calls.commands[2] == ["open", "-b", "com.example.browser"]
+    opens = [cmd for cmd in calls.commands if cmd and cmd[0] == "open"]
+    assert opens[0] == ["open", "-b", "com.example.browser", url]
+    assert opens[1] == ["open", "-b", "com.example.browser"]
     assert all("display dialog" not in " ".join(cmd) for cmd in calls.commands)
     err = capfd.readouterr().err
     assert "exit=1" in err
@@ -318,9 +330,24 @@ class _Plan:
         self.verify: dict[str, subprocess.CompletedProcess[bytes] | Exception] = {}
         self.frontmost = b"Terminal\n"
         self.installed: set[str] = set()
+        self.lock_states: list[bool] = []
+        self._lock_at = 0
+
+    def _lock_body(self) -> bytes:
+        if not self.lock_states:
+            locked = False
+        else:
+            index = min(self._lock_at, len(self.lock_states) - 1)
+            self._lock_at += 1
+            locked = self.lock_states[index]
+        return plistlib.dumps([{"CGSSessionScreenIsLocked": locked}])
 
     def run(self, args: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         self.commands.append(list(args))
+        if args and args[0] == "ioreg":
+            return subprocess.CompletedProcess(args, 0, self._lock_body(), b"")
+        if args and args[0] == "lsappinfo":
+            return subprocess.CompletedProcess(args, 0, b"Safari\n", b"")
         if _is_verify(args):
             planned = self.verify.get(args[-1])
             if isinstance(planned, Exception):
@@ -513,3 +540,139 @@ def test_post_returns_204_before_open_finishes(monkeypatch: pytest.MonkeyPatch) 
     finally:
         release.set()
         _stop(httpd)
+
+
+_DENIED_SET_WORDS = {
+    "kind",
+    "name",
+    "class",
+    "id",
+    "text",
+    "file",
+    "item",
+    "window",
+    "process",
+    "result",
+    "version",
+    "path",
+    "size",
+    "date",
+    "folder",
+}
+_SET_TARGET = re.compile(r"\bset\s+([A-Za-z_][A-Za-z0-9_]*)\s+to\b")
+
+
+def _future_expiry(seconds: float) -> str:
+    moment = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+    return moment.isoformat()
+
+
+def test_applescript_set_targets_avoid_reserved_words() -> None:
+    scripts = (
+        macos_notify._VERIFY_SCRIPT,
+        macos_notify._FRONTMOST_SCRIPT,
+        macos_notify._NOTIFY_SCRIPT,
+        macos_notify._DIALOG_SCRIPT,
+    )
+    for script in scripts:
+        for match in _SET_TARGET.finditer(script):
+            word = match.group(1)
+            assert word not in _DENIED_SET_WORDS, match.group(0)
+    verify = macos_notify._VERIFY_SCRIPT
+    assert "count of windows" in verify
+    assert "frontmost is true" not in verify
+    assert "set kind to" not in verify
+    assert "frontmost is true" in macos_notify._FRONTMOST_SCRIPT
+
+
+def test_verify_script_runs_without_reserved_word_error() -> None:
+    if shutil.which("osascript") is None:
+        pytest.skip("osascript is not installed")
+    result = subprocess.run(
+        macos_notify.verify_command("app", "AgentToolsNoSuchBrowser"),
+        capture_output=True,
+        timeout=15,
+    )
+    err = result.stderr.decode("utf-8", "replace")
+    assert "-10006" not in err
+    assert "-2741" not in err
+
+
+def test_locked_then_unlocked_opens_default_once(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    clock = _fast_clock(monkeypatch)
+    plan = _Plan()
+    plan.lock_states = [True, False]
+    plan.verify["Safari"] = subprocess.CompletedProcess([], 0, b"Safari|true|1", b"")
+    httpd = _serve_plan(monkeypatch, plan)
+    port = httpd.server_address[1]
+    url = "http://127.0.0.1:8765/h/token"
+    payload = _payload(url)
+    payload["expires_at"] = _future_expiry(3600)
+    try:
+        status = _post(port, payload)
+    finally:
+        _stop(httpd)
+    assert status == 204
+    url_opens = [cmd for cmd in plan.commands if cmd and cmd[0] == "open" and url in cmd]
+    assert url_opens == [["open", "-b", "com.apple.safari", url]]
+    assert ["open", "-a", "Google Chrome", url] not in plan.commands
+    assert all(cmd[0] != "lsappinfo" for cmd in plan.commands)
+    err = capfd.readouterr().err
+    assert "screen locked; waiting for unlock" in err
+    assert "verify app=Safari frontmost=True windows=1 -> ok" in err
+    assert clock.now >= 2
+
+
+def test_locked_until_expiry_opens_nothing(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    clock = _fast_clock(monkeypatch)
+    plan = _Plan()
+    plan.lock_states = [True]
+    httpd = _serve_plan(monkeypatch, plan)
+    port = httpd.server_address[1]
+    payload = _payload()
+    payload["expires_at"] = _future_expiry(5)
+    try:
+        status = _post(port, payload)
+    finally:
+        _stop(httpd)
+    assert status == 204
+    assert any(cmd and cmd[0] == "osascript" for cmd in plan.commands)
+    assert not any(cmd and cmd[0] == "open" for cmd in plan.commands)
+    err = capfd.readouterr().err
+    assert "screen locked; waiting for unlock" in err
+    assert "screen locked; gave up" in err
+    assert clock.now >= 2
+
+
+def test_verify_timeouts_stop_after_two_browsers(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    plan = _Plan()
+    plan.frontmost = b"Google Chrome\n"
+    timed_out = subprocess.CompletedProcess([], 1, b"", b"AppleEvent timed out (-1712)")
+    plan.verify["Safari"] = timed_out
+    plan.verify["Google Chrome"] = timed_out
+    plan.verify["Firefox"] = timed_out
+    httpd = _serve_plan(monkeypatch, plan)
+    port = httpd.server_address[1]
+    url = "http://127.0.0.1:8765/h/token"
+    try:
+        status = _post(port, _payload(url))
+    finally:
+        _stop(httpd)
+    assert status == 204
+    url_opens = [cmd for cmd in plan.commands if cmd and cmd[0] == "open" and url in cmd]
+    assert url_opens == [
+        ["open", "-b", "com.apple.safari", url],
+        ["open", "-a", "Google Chrome", url],
+    ]
+    assert ["open", "-a", "Firefox", url] not in plan.commands
+    assert ["open", "-a", "Arc", url] not in plan.commands
+    err = capfd.readouterr().err
+    assert "verify app=Safari frontmost=timeout windows=timeout -> fallback" in err
+    assert "verify app=Google Chrome frontmost=timeout windows=timeout -> fallback" in err
+    assert "verify unavailable; stopping after Google Chrome" in err

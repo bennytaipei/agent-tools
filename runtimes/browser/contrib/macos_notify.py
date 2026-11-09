@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -30,6 +31,7 @@ DEFAULT_PORT = 8767
 SAFARI_BUNDLE = "com.apple.safari"
 VERIFY_BUDGET_S = 4.0
 VERIFY_POLL_S = 0.25
+LOCK_POLL_S = 2.0
 _MAX_BODY = 65536
 _BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
 # Process names System Events reports. Safari is a frontmost candidate only.
@@ -67,26 +69,27 @@ _DIALOG_SCRIPT = (
     "end run"
 )
 # System Events only. App names and bundle ids arrive as argv, not as source.
+# Prefixed names: `set kind to` is error -10006 because `kind` is a property.
 _VERIFY_SCRIPT = (
     "on run argv\n"
-    "set kind to item 1 of argv\n"
-    "set target to item 2 of argv\n"
+    "set qKind to item 1 of argv\n"
+    "set qTarget to item 2 of argv\n"
     "with timeout of 3 seconds\n"
     'tell application "System Events"\n'
-    'if kind is "bundle" then\n'
+    'if qKind is "bundle" then\n'
     "ignoring case\n"
-    "set matches to (every application process whose bundle identifier is target)\n"
+    "set procList to (every application process whose bundle identifier is qTarget)\n"
     "end ignoring\n"
     "else\n"
-    "set matches to (every application process whose name is target)\n"
+    "set procList to (every application process whose name is qTarget)\n"
     "end if\n"
-    "if (count of matches) is 0 then\n"
+    "if (count of procList) is 0 then\n"
     'return "missing"\n'
     "end if\n"
-    "set targetProc to item 1 of matches\n"
-    "set procName to name of targetProc\n"
-    "set isFront to frontmost of targetProc\n"
-    "set winCount to count of windows of targetProc\n"
+    "set qProc to item 1 of procList\n"
+    "set procName to name of qProc\n"
+    "set isFront to frontmost of qProc\n"
+    "set winCount to count of windows of qProc\n"
     "if isFront then\n"
     'set frontText to "true"\n'
     "else\n"
@@ -134,6 +137,13 @@ class _Gate:
 
 
 _GATE = _Gate()
+
+
+class _OpenState:
+    def __init__(self) -> None:
+        self.dialog = False
+        self.timeouts = 0
+        self.stop = False
 
 
 class NotifyRequestError(ValueError):
@@ -210,27 +220,37 @@ def show_notification(reason: str) -> None:
     _check(_run(notification_command(reason)))
 
 
-def open_in_browser(url: str) -> None:
+def open_in_browser(url: str, expires_at: str) -> None:
     """Open url and stop at the first browser that is frontmost with a window.
 
-    `open` exiting 0 does not mean a window appeared. Safari can swallow the
-    URL while Google Chrome stays in front. Activate with `open -b` or
-    `open -a` again. `tell application ... to activate` can prompt for
-    Automation, which a background LaunchAgent cannot answer.
+    A locked screen is waited out until expires_at. No browser is opened while
+    the screen stays locked. `open` exiting 0 does not mean a window appeared.
+    Safari can swallow the URL while Google Chrome stays in front. Activate
+    with `open -b` or `open -a` again. `tell application ... to activate` can
+    prompt for Automation, which a background LaunchAgent cannot answer. Two
+    System Events verify timeouts in a row stop further fallbacks.
     """
 
     if not _http_url(url):
         raise NotifyRequestError("url must be an absolute http or https URL")
+    if not _wait_for_unlock(expires_at):
+        return
     tried: set[str] = set()
-    state = {"dialog": False}
+    state = _OpenState()
     for kind, target in _primary_targets():
         if _attempt(url, kind, target, tried, state, require_installed=False):
+            return
+        if state.stop:
             return
     front = _frontmost_browser()
     if front is not None:
         if _attempt(url, "app", front, tried, state, require_installed=False):
             return
+        if state.stop:
+            return
     for name in _FALLBACK_APPS:
+        if state.stop:
+            return
         if _attempt(url, "app", name, tried, state, require_installed=True):
             return
 
@@ -240,9 +260,11 @@ def _attempt(
     kind: str,
     target: str,
     tried: set[str],
-    state: dict[str, bool],
+    state: _OpenState,
     require_installed: bool,
 ) -> bool:
+    if state.stop:
+        return False
     keys = _identity_keys(kind, target)
     if tried.intersection(keys):
         return False
@@ -258,19 +280,27 @@ def _attempt(
     else:
         _run(open_app_command(url, target))
         focused = _run(activate_app_command(target))
-    if focused.returncode != 0 and _dialog_enabled() and not state["dialog"]:
+    if focused.returncode != 0 and _dialog_enabled() and not state.dialog:
         _run(dialog_command(url))
-        state["dialog"] = True
-    return _poll_verified(kind, target, label)
+        state.dialog = True
+    ok, timed_out = _poll_verified(kind, target, label)
+    if timed_out:
+        state.timeouts += 1
+        if state.timeouts >= 2:
+            _log_line(f"verify unavailable; stopping after {label}")
+            state.stop = True
+    else:
+        state.timeouts = 0
+    return ok
 
 
 def handle_payload(payload: object) -> None:
     """Notify, then open. HTTP callers send 204 before calling the open half."""
 
-    reason, url, _expires_at = _required_fields(payload)
+    reason, url, expires_at = _required_fields(payload)
     _log_line(f"request reason={reason!r} url={url}")
     show_notification(reason)
-    open_in_browser(url)
+    open_in_browser(url, expires_at)
 
 
 def make_server(port: int) -> ThreadingHTTPServer:
@@ -316,7 +346,7 @@ class _Handler(BaseHTTPRequestHandler):
         _log_line(f"request POST path={self.path}")
         try:
             payload = _read_json(self)
-            reason, url, _expires_at = _required_fields(payload)
+            reason, url, expires_at = _required_fields(payload)
             _log_line(f"request reason={reason!r} url={url}")
             show_notification(reason)
         except NotifyRequestError:
@@ -335,7 +365,7 @@ class _Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
             try:
-                open_in_browser(url)
+                open_in_browser(url, expires_at)
             except Exception as exc:
                 _log_line(f"open failed error={exc}")
         finally:
@@ -479,7 +509,9 @@ def _verify_query(kind: str, target: str) -> tuple[str, str]:
     return "bundle", target
 
 
-def _poll_verified(kind: str, target: str, label: str) -> bool:
+def _poll_verified(kind: str, target: str, label: str) -> tuple[bool, bool]:
+    """Return (verified, timed_out). A timeout ends the attempt immediately."""
+
     query_kind, query_target = _verify_query(kind, target)
     deadline = time.monotonic() + VERIFY_BUDGET_S
     last_front = "False"
@@ -490,7 +522,7 @@ def _poll_verified(kind: str, target: str, label: str) -> bool:
             _log_line(
                 f"verify app={label} frontmost={last_front} windows={last_windows} -> fallback"
             )
-            return False
+            return False, False
         try:
             result = _run(
                 verify_command(query_kind, query_target),
@@ -498,10 +530,10 @@ def _poll_verified(kind: str, target: str, label: str) -> bool:
             )
         except subprocess.TimeoutExpired:
             _log_line(f"verify app={label} frontmost=timeout windows=timeout -> fallback")
-            return False
+            return False, True
         if _result_timed_out(result):
             _log_line(f"verify app={label} frontmost=timeout windows=timeout -> fallback")
-            return False
+            return False, True
         parsed = _parse_verify(result.stdout)
         if parsed is not None:
             name, front, windows = parsed
@@ -511,7 +543,7 @@ def _poll_verified(kind: str, target: str, label: str) -> bool:
             last_windows = str(windows)
             if front and windows >= 1:
                 _log_line(f"verify app={label} frontmost=True windows={windows} -> ok")
-                return True
+                return True, False
         time.sleep(min(VERIFY_POLL_S, remaining))
 
 
@@ -536,6 +568,93 @@ def _result_timed_out(result: subprocess.CompletedProcess) -> bool:
     if result.stderr:
         err = result.stderr.decode("utf-8", "replace").lower()
     return "timeout" in err or "-1712" in err
+
+
+def _find_locked(node: object) -> bool | None:
+    if isinstance(node, dict):
+        if "CGSSessionScreenIsLocked" in node:
+            value = node["CGSSessionScreenIsLocked"]
+            if isinstance(value, bool):
+                return value
+            return None
+        for child in node.values():
+            found = _find_locked(child)
+            if found is not None:
+                return found
+        return None
+    if isinstance(node, list):
+        for child in node:
+            found = _find_locked(child)
+            if found is not None:
+                return found
+    return None
+
+
+def _lock_from_ioreg() -> bool | None:
+    try:
+        result = _run(["ioreg", "-n", "Root", "-d1", "-a"], timeout=VERIFY_BUDGET_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout:
+        return None
+    try:
+        data = plistlib.loads(result.stdout)
+    except (plistlib.InvalidFileException, ValueError, OverflowError):
+        return None
+    return _find_locked(data)
+
+
+def _lock_from_lsappinfo() -> bool:
+    try:
+        result = _run(["lsappinfo", "front"], timeout=VERIFY_BUDGET_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0 or not result.stdout:
+        return False
+    text = result.stdout.decode("utf-8", "replace")
+    return "loginwindow" in text.lower()
+
+
+def _screen_locked() -> bool:
+    locked = _lock_from_ioreg()
+    if locked is not None:
+        return locked
+    return _lock_from_lsappinfo()
+
+
+def _seconds_until(expires_at: str) -> float | None:
+    text = expires_at.strip()
+    if text.endswith("Z") or text.endswith("z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed - datetime.now(timezone.utc)).total_seconds()
+
+
+def _wait_for_unlock(expires_at: str) -> bool:
+    """True when the screen is unlocked in time to open a browser."""
+
+    if not _screen_locked():
+        return True
+    _log_line("screen locked; waiting for unlock")
+    seconds = _seconds_until(expires_at)
+    if seconds is None or seconds <= 0:
+        _log_line("screen locked; gave up")
+        return False
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        time.sleep(min(LOCK_POLL_S, remaining))
+        if time.monotonic() >= deadline:
+            break
+        if not _screen_locked():
+            return True
+    _log_line("screen locked; gave up")
+    return False
 
 
 def _frontmost_browser() -> str | None:
