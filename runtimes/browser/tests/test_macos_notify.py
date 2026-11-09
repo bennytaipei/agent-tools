@@ -40,6 +40,26 @@ def _fast_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
     return clock
 
 
+_CALLS_ASN = "ASN:0x0-0x1111:"
+_CALLS_INFO = (
+    b'"Terminal" ASN:0x0-0x1111: (in front)\n    bundleID="com.apple.Terminal"\n'
+)
+
+
+def _lsappinfo_body(args: list[str], asn: str, info: bytes, name_only: bytes = b"", bundle_only: bytes = b"") -> bytes:
+    if args == ["lsappinfo", "front"]:
+        return (asn + "\n").encode()
+    if args[:2] != ["lsappinfo", "info"] or args[-1] != asn:
+        return b""
+    if args == ["lsappinfo", "info", asn]:
+        return info
+    if args == ["lsappinfo", "info", "-only", "name", asn]:
+        return name_only
+    if args == ["lsappinfo", "info", "-only", "bundleid", asn]:
+        return bundle_only
+    return b""
+
+
 class _Calls:
     def __init__(self, codes: list[int] | None = None, stderrs: list[bytes] | None = None) -> None:
         self.commands: list[list[str]] = []
@@ -52,7 +72,8 @@ class _Calls:
             body = plistlib.dumps([{"CGSSessionScreenIsLocked": False}])
             return subprocess.CompletedProcess(args, 0, body, b"")
         if args and args[0] == "lsappinfo":
-            return subprocess.CompletedProcess(args, 0, b"Terminal\n", b"")
+            body = _lsappinfo_body(args, _CALLS_ASN, _CALLS_INFO)
+            return subprocess.CompletedProcess(args, 0, body, b"")
         code = self.codes.pop(0) if self.codes else 0
         stderr = self.stderrs.pop(0) if self.stderrs else b""
         return subprocess.CompletedProcess(args, code, b"", stderr)
@@ -116,7 +137,7 @@ def test_post_notifies_and_opens(monkeypatch: pytest.MonkeyPatch) -> None:
         macos_notify.notification_command(reason),
         ["ioreg", "-n", "Root", "-d1", "-a"],
         ["lsappinfo", "front"],
-        ["lsappinfo", "info"],
+        ["lsappinfo", "info", _CALLS_ASN],
         ["open", "-b", "com.apple.safari", url],
         ["open", "-b", "com.apple.safari"],
     ]
@@ -311,7 +332,12 @@ class _Plan:
 
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
-        self.frontmost = b"Terminal\n"
+        self.asn = "ASN:0x0-0x1234:"
+        self.info = (
+            b'"Terminal" ASN:0x0-0x1234: (in front)\n    bundleID="com.apple.Terminal"\n'
+        )
+        self.name_only = b""
+        self.bundle_only = b""
         self.lock_states: list[bool] = []
         self._lock_at = 0
         self.url_open_codes: list[int] = []
@@ -330,7 +356,8 @@ class _Plan:
         if args and args[0] == "ioreg":
             return subprocess.CompletedProcess(args, 0, self._lock_body(), b"")
         if args and args[0] == "lsappinfo":
-            return subprocess.CompletedProcess(args, 0, self.frontmost, b"")
+            body = _lsappinfo_body(args, self.asn, self.info, self.name_only, self.bundle_only)
+            return subprocess.CompletedProcess(args, 0, body, b"")
         if args and args[0] == "open" and len(args) >= 4:
             code = self.url_open_codes.pop(0) if self.url_open_codes else 0
             return subprocess.CompletedProcess(args, code, b"", b"")
@@ -360,7 +387,7 @@ def test_successful_open_does_not_open_another_browser(
     monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
     plan = _Plan()
-    plan.frontmost = b'ASN:0x0-0x1234: "Google Chrome"\n'
+    plan.info = b'"Google Chrome" ASN:0x0-0x1234: (in front)\n'
     httpd = _serve_plan(monkeypatch, plan)
     port = httpd.server_address[1]
     url = "http://127.0.0.1:8765/h/token"
@@ -369,6 +396,9 @@ def test_successful_open_does_not_open_another_browser(
     finally:
         _stop(httpd)
     assert status == 204
+    assert ["lsappinfo", "front"] in plan.commands
+    assert ["lsappinfo", "info", plan.asn] in plan.commands
+    assert ["lsappinfo", "info"] not in plan.commands
     assert _url_opens(plan.commands, url) == [["open", "-a", "Google Chrome", url]]
     assert ["open", "-b", "com.apple.safari", url] not in plan.commands
     assert ["open", "-a", "Firefox", url] not in plan.commands
@@ -382,7 +412,7 @@ def test_open_failure_falls_back_once(
     monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
     plan = _Plan()
-    plan.frontmost = b'ASN:0x0-0x1234: "Google Chrome"\n'
+    plan.info = b'"Google Chrome" ASN:0x0-0x1234: (in front)\n'
     plan.url_open_codes = [1, 0]
     httpd = _serve_plan(monkeypatch, plan)
     port = httpd.server_address[1]
@@ -408,7 +438,7 @@ def test_handoff_browser_env_is_tried_first(
     monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
     plan = _Plan()
-    plan.frontmost = b'ASN:0x0-0x1234: "Google Chrome"\n'
+    plan.info = b'"Google Chrome" ASN:0x0-0x1234: (in front)\n'
     httpd = _serve_plan(monkeypatch, plan)
     monkeypatch.setenv(macos_notify.HANDOFF_BROWSER_ENV, "Firefox")
     port = httpd.server_address[1]
@@ -430,7 +460,6 @@ def test_failed_open_without_a_next_candidate_stays_one_browser(
     monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
     plan = _Plan()
-    plan.frontmost = b"Terminal\n"
     plan.url_open_codes = [1]
     httpd = _serve_plan(monkeypatch, plan)
     port = httpd.server_address[1]
@@ -515,12 +544,59 @@ def test_applescript_set_targets_avoid_reserved_words() -> None:
 
 
 def test_lsappinfo_text_names_a_browser_without_system_events() -> None:
-    quoted = 'ASN:0x0-0x1234: "Google Chrome"'
+    quoted = '"Google Chrome" ASN:0x0-0x1234: (in front)'
     assert macos_notify._known_browser_in(quoted) == "Google Chrome"
+    assert macos_notify._browser_from_lsappinfo(quoted) == "Google Chrome"
     assert macos_notify._known_browser_in("Google Chrome\n") == "Google Chrome"
     assert macos_notify._known_browser_in("com.apple.safari") is None
+    assert macos_notify._browser_from_lsappinfo('bundleID="com.google.chrome"') == "Google Chrome"
+    assert macos_notify._browser_from_lsappinfo('bundleID="com.google.Chrome"') == "Google Chrome"
+    login = '"loginwindow" ASN:0x0-0x3003: (in front)\n    bundleID="com.apple.loginwindow"'
+    assert macos_notify._browser_from_lsappinfo(login) is None
+    assert macos_notify._asn_token("ASN:0x0-0x3003:\n") == "ASN:0x0-0x3003:"
     assert macos_notify._known_browser_in("loginwindow") is None
     assert macos_notify._known_browser_in('ASN:0x0-0x1: "Arc"') == "Arc"
+
+
+def test_loginwindow_frontmost_opens_default_safari(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _Plan()
+    plan.info = (
+        b'"loginwindow" ASN:0x0-0x1234: (in front)\n    bundleID="com.apple.loginwindow"\n'
+    )
+    httpd = _serve_plan(monkeypatch, plan)
+    port = httpd.server_address[1]
+    url = "http://127.0.0.1:8765/h/token"
+    try:
+        status = _post(port, _payload(url))
+    finally:
+        _stop(httpd)
+    assert status == 204
+    assert ["lsappinfo", "info", plan.asn] in plan.commands
+    assert ["lsappinfo", "info"] not in plan.commands
+    assert _url_opens(plan.commands, url) == [["open", "-b", "com.apple.safari", url]]
+    assert ["open", "-a", "Google Chrome", url] not in plan.commands
+
+
+def test_bundle_id_only_frontmost_opens_chrome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _Plan()
+    plan.info = b""
+    plan.bundle_only = b'"CFBundleIdentifier"="com.google.chrome"\n'
+    httpd = _serve_plan(monkeypatch, plan)
+    port = httpd.server_address[1]
+    url = "http://127.0.0.1:8765/h/token"
+    try:
+        status = _post(port, _payload(url))
+    finally:
+        _stop(httpd)
+    assert status == 204
+    assert ["lsappinfo", "info", plan.asn] in plan.commands
+    assert ["lsappinfo", "info", "-only", "bundleid", plan.asn] in plan.commands
+    assert ["lsappinfo", "info"] not in plan.commands
+    assert _url_opens(plan.commands, url) == [["open", "-a", "Google Chrome", url]]
 
 
 def test_locked_then_unlocked_opens_default_once(

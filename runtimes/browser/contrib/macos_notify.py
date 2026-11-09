@@ -542,14 +542,21 @@ def _wait_for_unlock(expires_at: str) -> bool:
     return False
 
 
-def _lsappinfo_text(mode: str) -> str | None:
+def _lsappinfo_query(args: list[str]) -> str | None:
     try:
-        result = _run(["lsappinfo", mode], timeout=VERIFY_BUDGET_S)
+        result = _run(args, timeout=VERIFY_BUDGET_S)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if result.returncode != 0 or not result.stdout:
         return None
     return result.stdout.decode("utf-8", "replace")
+
+
+def _asn_token(text: str) -> str | None:
+    match = re.search(r"ASN:0x[0-9A-Fa-f]+-0x[0-9A-Fa-f]+:", text)
+    if not match:
+        return None
+    return match.group(0)
 
 
 def _canonical_browser(value: str) -> str | None:
@@ -580,18 +587,44 @@ def _known_browser_in(text: str) -> str | None:
     return None
 
 
-def _frontmost_browser_name() -> str | None:
-    """Frontmost known browser via lsappinfo. No System Events, no TCC prompt."""
+def _browser_from_lsappinfo(text: str) -> str | None:
+    """Display name, or a known bundle id, from lsappinfo info text."""
 
-    front = _lsappinfo_text("front")
-    if front:
-        found = _known_browser_in(front)
+    found = _known_browser_in(text)
+    if found:
+        return found
+    folded = text.casefold()
+    bundles = sorted(_BUNDLE_APP.items(), key=lambda item: len(item[0]), reverse=True)
+    for bundle, app in bundles:
+        if bundle.casefold() in folded:
+            return app
+    return None
+
+
+def _frontmost_browser_name() -> str | None:
+    """Frontmost known browser via lsappinfo. No System Events, no TCC prompt.
+
+    `lsappinfo front` is only an ASN. Bare `lsappinfo info` is empty, so the
+    ASN is passed to `lsappinfo info`.
+    """
+
+    front = _lsappinfo_query(["lsappinfo", "front"])
+    if not front:
+        return None
+    asn = _asn_token(front)
+    if not asn:
+        return None
+    info = _lsappinfo_query(["lsappinfo", "info", asn])
+    if info:
+        return _browser_from_lsappinfo(info)
+    for mode in ("name", "bundleid"):
+        extra = _lsappinfo_query(["lsappinfo", "info", "-only", mode, asn])
+        if not extra:
+            continue
+        found = _browser_from_lsappinfo(extra)
         if found:
             return found
-    info = _lsappinfo_text("info")
-    if not info:
-        return None
-    return _known_browser_in(info)
+    return None
 
 
 def _http_url(url: str) -> bool:
