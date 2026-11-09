@@ -7,11 +7,13 @@ Every path stops x11vnc and websockify.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import urllib.error
@@ -118,8 +120,10 @@ class HandoffShare:
         self._page_port_pref: int | None = None
         self._public_page_port: int | None = None
         self._public_novnc_port: int | None = None
+        self._reason = ""
 
-    def start(self) -> None:
+    def start(self, reason: str = "") -> None:
+        self._reason = reason
         self._state_dir.mkdir(parents=True, exist_ok=True)
         try:
             settings = listen_settings()
@@ -207,12 +211,13 @@ class HandoffShare:
         token_path = self._state_dir / "novnc.token"
         token_path.write_text(f"{self._token}: 127.0.0.1:{self.vnc_port}\n", encoding="utf-8")
         token_path.chmod(0o600)
+        web_root = _novnc_web_root(self._state_dir)
         log_path = self._state_dir / "websockify.log"
         tracked = spawn(
             [
                 "websockify",
                 "--web",
-                NOVNC_WEB,
+                str(web_root),
                 "--token-plugin",
                 "TokenFile",
                 "--token-source",
@@ -228,8 +233,14 @@ class HandoffShare:
 
     def _start_page(self) -> None:
         iframe_port = self.novnc_port if self._public_novnc_port is None else self._public_novnc_port
-        html = _page(self._token, iframe_port, self.novnc_port, self._public_host)
-        handler = _handler_class(self._token, html, self._accept)
+        page = render_handoff_page(
+            self._token,
+            iframe_port,
+            self.novnc_port,
+            self._public_host,
+            self._reason,
+        ).encode("utf-8")
+        handler = _handler_class(self._token, page, self._accept)
         page_port = 0 if self._page_port_pref is None else self._page_port_pref
         httpd = _ReuseHTTPServer((self._bind_host, page_port), handler)
         httpd.daemon_threads = True
@@ -385,63 +396,176 @@ def _optional_port(name: str) -> int | None:
     return port
 
 
-def _page(token: str, iframe_port: int, bound_novnc_port: int, public_host: str) -> bytes:
-    iframe = (
-        f"http://{public_host}:{iframe_port}/vnc.html?autoconnect=1&resize=scale"
-        f"&path=websockify%3Ftoken%3D{token}"
-    )
-    html = f"""<!DOCTYPE html>
+_HANDOFF_FALLBACK = "Sign in or finish the step, then click Done."
+
+_VIEW_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>noVNC</title>
+  <style>
+    html, body, #screen {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: #0f0f10;
+      overflow: hidden;
+    }
+  </style>
+  <script type="module">
+    import RFB from './core/rfb.js';
+
+    function query(name, fallback) {
+      const match = document.location.href.match(new RegExp('.*[?&]' + name + '=([^&#]*)'));
+      return match ? decodeURIComponent(match[1]) : fallback;
+    }
+
+    const path = query('path', 'websockify');
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const url = scheme + '://' + location.host + '/' + path;
+    const rfb = new RFB(document.getElementById('screen'), url);
+    rfb.scaleViewport = true;
+    rfb.background = '#0f0f10';
+  </script>
+</head>
+<body>
+  <div id="screen"></div>
+</body>
+</html>
+"""
+
+
+def _novnc_web_root(state_dir: Path) -> Path:
+    """Directory websockify serves: our viewer plus noVNC's core modules."""
+
+    root = state_dir / "novnc-web"
+    root.mkdir(parents=True, exist_ok=True)
+    link = root / "core"
+    target = Path(NOVNC_WEB) / "core"
+    desired = str(target)
+    if link.is_symlink():
+        if os.readlink(link) != desired:
+            link.unlink()
+            link.symlink_to(target, target_is_directory=True)
+    elif link.exists():
+        if link.is_dir():
+            shutil.rmtree(link)
+        else:
+            link.unlink()
+        link.symlink_to(target, target_is_directory=True)
+    else:
+        link.symlink_to(target, target_is_directory=True)
+    (root / "view.html").write_text(_VIEW_HTML, encoding="utf-8")
+    return root
+
+
+def render_handoff_page(
+    token: str,
+    iframe_port: int,
+    bound_novnc_port: int,
+    public_host: str,
+    reason: str = "",
+    iframe_src: str | None = None,
+) -> str:
+    """Handoff page. iframe_src replaces the live noVNC frame for a screenshot."""
+
+    text = reason.strip() if isinstance(reason, str) and reason.strip() else _HANDOFF_FALLBACK
+    if iframe_src is None:
+        iframe_src = (
+            f"http://{public_host}:{iframe_port}/view.html?autoconnect=1&resize=scale"
+            f"&path=websockify%3Ftoken%3D{token}"
+        )
+    safe_reason = html.escape(text, quote=True)
+    safe_src = html.escape(iframe_src, quote=True)
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <title>Browser handoff</title>
   <style>
-    body {{ margin: 0; font-family: sans-serif; }}
-    .banner {{
+    :root {{ --handoff-bar: 40px; }}
+    html, body {{ margin: 0; background: #0f0f10; height: 100%; }}
+    .bar {{
       position: fixed;
       top: 0;
       left: 0;
       right: 0;
       z-index: 20;
-      margin: 0;
-      padding: 12px 16px;
-      background: #111;
-      color: #fff;
-      font-size: 20px;
-    }}
-    .bar {{
-      position: fixed;
-      top: 52px;
-      left: 0;
-      right: 0;
-      z-index: 21;
+      box-sizing: border-box;
+      height: var(--handoff-bar);
       display: flex;
+      align-items: center;
+      justify-content: space-between;
       gap: 12px;
-      padding: 8px 16px;
-      background: #222;
+      padding: 0 12px;
+      background: #0f0f10;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      font-family: system-ui, sans-serif;
     }}
-    button {{ font-size: 28px; padding: 14px 28px; }}
+    .instruction {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+      color: #a1a1aa;
+      font-size: 13px;
+    }}
+    .dot {{
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: #a1a1aa;
+      flex: none;
+    }}
+    .text {{
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
+    .actions {{ display: flex; gap: 8px; flex: none; }}
+    form {{ margin: 0; }}
+    button {{
+      height: 28px;
+      padding: 0 12px;
+      border-radius: 999px;
+      font: 13px system-ui, sans-serif;
+      cursor: pointer;
+    }}
+    button.done {{ background: #fff; color: #0f0f10; border: 0; }}
+    button.cancel {{
+      background: transparent;
+      color: #a1a1aa;
+      border: 1px solid rgba(255,255,255,0.16);
+    }}
+    button.done:hover, button.done:focus-visible {{ background: #e4e4e7; }}
+    button.cancel:hover, button.cancel:focus-visible {{
+      color: #fff;
+      border-color: rgba(255,255,255,0.4);
+    }}
     iframe {{
       position: fixed;
-      top: 140px;
+      top: var(--handoff-bar);
       left: 0;
       width: 100vw;
-      height: calc(100vh - 140px);
+      height: calc(100vh - var(--handoff-bar));
       border: 0;
+      background: #0f0f10;
     }}
   </style>
 </head>
 <body>
-  <p class="banner">Sign in or finish the step, then click Done.</p>
   <div class="bar" data-novnc-port="{bound_novnc_port}">
-    <form method="post" action="/h/{token}/done"><button type="submit">Done</button></form>
-    <form method="post" action="/h/{token}/cancel"><button type="submit">Cancel</button></form>
+    <div class="instruction"><span class="dot"></span><span class="text">{safe_reason}</span></div>
+    <div class="actions">
+      <form method="post" action="/h/{token}/done"><button class="done" type="submit">Done</button></form>
+      <form method="post" action="/h/{token}/cancel"><button class="cancel" type="submit">Cancel</button></form>
+    </div>
   </div>
-  <iframe src="{iframe}" title="noVNC"></iframe>
+  <iframe src="{safe_src}" title="noVNC"></iframe>
 </body>
 </html>
 """
-    return html.encode("utf-8")
 
 
 def _handler_class(token: str, html: bytes, accept):

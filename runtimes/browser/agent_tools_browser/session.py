@@ -386,7 +386,7 @@ class BrowserSession:
         share = HandoffShare(self._display, self._auth, self._state, self._markers)
         self._share = share
         try:
-            await asyncio.to_thread(share.start)
+            await asyncio.to_thread(share.start, reason)
             await asyncio.to_thread(share.notify, reason, timeout, webhook)
             outcome = await self._await_handoff(share, timeout, done_when)
         except NotifyError:

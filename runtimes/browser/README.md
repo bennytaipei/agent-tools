@@ -2,7 +2,7 @@
 
 Reference MCP server for the browser tools. The manifests in `catalog/browser/` are the contract. This package loads each tool's name, description, and schemas from those files at startup.
 
-The server speaks MCP over stdio. A remote agent drives one headed Chrome session. On a login wall it calls `handoff`. Benny opens the returned URL, uses the same live browser through noVNC, and presses Done or Cancel. The page keeps those buttons visible and says "Sign in or finish the step, then click Done." Optional `done_when` names the page after sign-in. `url_matches` is matched against the page URL without the query string or fragment (`scheme://host[:port]/path`). `selector_present` and `text_present` count only visible elements. Auto-complete waits until that condition has been false once in the handoff and then true on two consecutive polls. A condition that is already true on the first poll does not auto-complete. The result then has `completed_by` `auto` and `reason` `auto_detected`.
+The server speaks MCP over stdio. A remote agent drives one headed Chrome session. On a login wall it calls `handoff`. Benny opens the returned URL, uses the same live browser through noVNC, and presses Done or Cancel. The page is one slim dark bar with the handoff reason, or "Sign in or finish the step, then click Done." when no reason was given, and compact Done and Cancel buttons. The remote screen fills the rest. Optional `done_when` names the page after sign-in. `url_matches` is matched against the page URL without the query string or fragment (`scheme://host[:port]/path`). `selector_present` and `text_present` count only visible elements. Auto-complete waits until that condition has been false once in the handoff and then true on two consecutive polls. A condition that is already true on the first poll does not auto-complete. The result then has `completed_by` `auto` and `reason` `auto_detected`.
 
 ## Run
 
@@ -12,7 +12,7 @@ From the repo root, with nothing installed globally:
 uv run --project runtimes/browser python -m agent_tools_browser
 ```
 
-The default browser is the system binary `/usr/bin/google-chrome` (Playwright channel `chrome`). The process starts Xvfb on a free display and does not attach to a display that is already in use. `x11vnc` and `websockify` start only during `handoff`, use a free port, and stop when the call returns. websockify serves the bundled noVNC files at `/usr/share/novnc`.
+The default browser is the system binary `/usr/bin/google-chrome` (Playwright channel `chrome`). The process starts Xvfb on a free display and does not attach to a display that is already in use. `x11vnc` and `websockify` start only during `handoff`, use a free port, and stop when the call returns. websockify serves a small `view.html` plus the noVNC core modules from `/usr/share/novnc/core`. The frame scales to fit and does not show noVNC's control bar.
 
 To run that server inside a container, register `runtimes/browser/bin/agent-tools-browser` instead of this command. The section below is that launcher.
 

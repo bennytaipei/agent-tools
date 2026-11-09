@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import json
 import math
 import re
@@ -39,6 +40,7 @@ from agent_tools_browser.handoff import (
     ShareError,
     listen_settings,
     prepare_done_when,
+    render_handoff_page,
 )
 from agent_tools_browser.processes import ProcessError, cmdline, pids_matching, port_is_open, reap
 from agent_tools_browser.session import (
@@ -292,6 +294,31 @@ def test_viewport_offsets() -> None:
     assert normalize_max_viewports(True) is None
 
 
+def test_handoff_page_is_one_bar_and_escapes_reason() -> None:
+    page = render_handoff_page(
+        "tok",
+        9,
+        8,
+        "127.0.0.1",
+        "<img src=x onerror=alert(1)>",
+    )
+    assert page.count('class="bar"') == 1
+    assert 'class="banner"' not in page
+    assert "<img" not in page
+    assert "&lt;img" in page
+    assert "--handoff-bar: 40px" in page
+    assert "height: var(--handoff-bar)" in page
+    assert "top: var(--handoff-bar)" in page
+    assert ">Done<" in page and ">Cancel<" in page
+    assert 'method="post"' in page
+    assert 'action="/h/tok/done"' in page
+    assert 'action="/h/tok/cancel"' in page
+    assert "/view.html?" in page and "token%3Dtok" in page
+    assert "font-size: 28px" not in page
+    blank = render_handoff_page("tok", 9, 8, "127.0.0.1", "  ")
+    assert "Sign in or finish the step, then click Done." in blank
+
+
 def test_handoff_eval_error_does_not_arm_transition() -> None:
     asyncio.run(_handoff_eval_error_does_not_arm())
 
@@ -520,15 +547,11 @@ async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
             assert parsed.path.startswith("/h/")
             page_url = f"http://127.0.0.1:{page_port}{parsed.path}"
             page = urllib.request.urlopen(page_url, timeout=5).read().decode()
-            assert "Sign in or finish the step, then click Done." in page
-            assert "position: fixed" in page
-            assert "font-size: 28px" in page
-            assert ">Done<" in page
-            assert ">Cancel<" in page
-            assert f"http://{public_host}:{public_novnc}/vnc.html" in page
+            _assert_handoff_chrome(page, "login wall")
+            assert f"http://{public_host}:{public_novnc}/view.html" in page
             assert int(page.split('data-novnc-port="', 1)[1].split('"', 1)[0]) == novnc_port
             assert port_is_open(novnc_port)
-            novnc = urllib.request.urlopen(f"http://127.0.0.1:{novnc_port}/vnc.html", timeout=5)
+            novnc = urllib.request.urlopen(f"http://127.0.0.1:{novnc_port}/view.html", timeout=5)
             assert b"noVNC" in novnc.read()
             request = urllib.request.Request(page_url + "/done", data=b"", method="POST")
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -889,6 +912,21 @@ async def _assert_navigate_read_screenshot(client: Client, site_port: int, lande
     _assert_screenshot_image(shot_result, shot)
 
 
+def _assert_handoff_chrome(page: str, reason: str) -> None:
+    assert page.count('class="bar"') == 1
+    assert 'class="banner"' not in page
+    assert html.escape(reason, quote=True) in page
+    assert "--handoff-bar: 40px" in page
+    assert "height: var(--handoff-bar)" in page
+    assert "top: var(--handoff-bar)" in page
+    assert ">Done<" in page
+    assert ">Cancel<" in page
+    assert 'method="post"' in page
+    assert "/done" in page and "/cancel" in page
+    assert "position: fixed" in page
+    assert "font-size: 28px" not in page
+
+
 async def _assert_handoff(
     client: Client,
     received: Queue[dict],
@@ -909,14 +947,10 @@ async def _assert_handoff(
     assert "T" in parsed_expiry and parsed_expiry.endswith("+00:00")
 
     page = urllib.request.urlopen(payload["url"], timeout=5).read().decode()
-    assert "Sign in or finish the step, then click Done." in page
-    assert "position: fixed" in page
-    assert "font-size: 28px" in page
-    assert ">Done<" in page
-    assert ">Cancel<" in page
+    _assert_handoff_chrome(page, reason)
     novnc_port = int(page.split('data-novnc-port="', 1)[1].split('"', 1)[0])
     assert port_is_open(novnc_port)
-    novnc = urllib.request.urlopen(f"http://127.0.0.1:{novnc_port}/vnc.html", timeout=5)
+    novnc = urllib.request.urlopen(f"http://127.0.0.1:{novnc_port}/view.html", timeout=5)
     assert b"noVNC" in novnc.read()
     if action == "/done":
         token = page.split("token%3D", 1)[1].split('"', 1)[0]
