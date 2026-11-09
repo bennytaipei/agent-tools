@@ -2,7 +2,7 @@
 
 Reference MCP server for the browser tools. The manifests in `catalog/browser/` are the contract. This package loads each tool's name, description, and schemas from those files at startup.
 
-The server speaks MCP over stdio. A remote agent drives one headed Chrome session. On a login wall it calls `handoff`. Benny opens the returned URL, uses the same live browser through noVNC, and presses Done or Cancel. The page keeps those buttons visible and says "Sign in or finish the step, then click Done." Optional `done_when` ends the share when the page URL, a CSS selector, or text matches, and the result then has `completed_by` `auto` and `reason` `auto_detected`.
+The server speaks MCP over stdio. A remote agent drives one headed Chrome session. On a login wall it calls `handoff`. Benny opens the returned URL, uses the same live browser through noVNC, and presses Done or Cancel. The page keeps those buttons visible and says "Sign in or finish the step, then click Done." Optional `done_when` names the page after sign-in. `url_matches` is matched against the page URL without the query string or fragment (`scheme://host[:port]/path`). `selector_present` and `text_present` count only visible elements. Auto-complete waits until that condition has been false once in the handoff and then true on two consecutive polls. A condition that is already true on the first poll does not auto-complete. The result then has `completed_by` `auto` and `reason` `auto_detected`.
 
 ## Run
 
@@ -130,7 +130,7 @@ Set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT` to pin a published po
 
 ### Install the listener
 
-`runtimes/browser/contrib/macos_notify.py` is a stdlib program. It binds `127.0.0.1`. The port comes from `AGENT_TOOLS_MACOS_NOTIFY_PORT`, or from `--port`. The default is `8767`. A POST whose JSON has `reason`, `url`, and `expires_at` runs `osascript` to show `reason`, then runs `open` on `url`, then returns 204.
+`runtimes/browser/contrib/macos_notify.py` is a stdlib program. It binds `127.0.0.1`. The port comes from `AGENT_TOOLS_MACOS_NOTIFY_PORT`, or from `--port`. The default is `8767`. A POST whose JSON has `reason`, `url`, and `expires_at` runs `osascript` to show `reason` (title `Browser handoff`), then runs `open -b <bundle> <url>` and `open -b <bundle>` so that browser comes forward, then returns 204. The bundle is `AGENT_TOOLS_NOTIFY_BROWSER`, or the default http handler in `~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist`, or `com.apple.safari`. Each request and each command's exit code and stderr are written to stderr, which the LaunchAgent stores in `/tmp/agent-tools-browser-notify.log`. `AGENT_TOOLS_NOTIFY_DIALOG=1` shows an Open dialog only when that second `open` fails. The dialog is off unless that variable is set.
 
 The launchd template is `runtimes/browser/contrib/com.agent-tools.browser-notify.plist`. Copy it and replace the `__REPO_ROOT__` path with the absolute path of this repo:
 

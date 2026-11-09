@@ -11,6 +11,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
@@ -47,6 +48,13 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 READ_MAX_VIEWPORTS_DEFAULT = 10
 
 
+def _url_for_match(url: str) -> str:
+    """Page URL without the query string or fragment."""
+
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}{parts.path}"
+
+
 def _user_handoff(status: str | None) -> dict | None:
     if status == "done":
         return {"status": "done", "completed_by": "user"}
@@ -64,6 +72,7 @@ CHROME_ARGS = [
     "--disable-sync",
     "--disable-extensions",
     "--hide-crash-restore-bubble",
+    "--disable-popup-blocking",
     "--window-size=1280,800",
     "--window-position=0,0",
 ]
@@ -183,6 +192,7 @@ class BrowserSession:
         self._page: Page | None = None
         self._has_page = False
         self._share: HandoffShare | None = None
+        self._handoff_origin_ids: set[int] = set()
         self._start_lock = asyncio.Lock()
         self._closed = False
 
@@ -369,6 +379,15 @@ class BrowserSession:
         done_when: dict | None,
     ) -> dict | str:
         deadline = time.monotonic() + timeout
+        # Pages already open belong to the session. A page created after this
+        # point is an SSO popup, and that is the page Benny is looking at.
+        context = self._context
+        self._handoff_origin_ids = (
+            {id(page) for page in context.pages} if context is not None else set()
+        )
+        seen_false = False
+        consecutive_true = 0
+        warned_already_true = False
         while True:
             user = _user_handoff(share.user_result())
             if user is not None:
@@ -377,9 +396,25 @@ class BrowserSession:
                 try:
                     matched = await self._done_when_matches(done_when)
                 except Exception:
-                    log.exception("done_when poll failed")
-                    return "share_failed"
-                if matched:
+                    log.warning("done_when poll failed", exc_info=True)
+                    matched = False
+                    seen_false = True
+                    consecutive_true = 0
+                else:
+                    if matched and seen_false:
+                        consecutive_true += 1
+                    elif matched:
+                        consecutive_true = 0
+                        if not warned_already_true:
+                            log.warning(
+                                "done_when already true on the first observation; "
+                                "waiting for a false-to-true transition"
+                            )
+                            warned_already_true = True
+                    else:
+                        seen_false = True
+                        consecutive_true = 0
+                if matched and seen_false and consecutive_true >= 2:
                     user = _user_handoff(share.user_result())
                     if user is not None:
                         return user
@@ -393,18 +428,38 @@ class BrowserSession:
                 return {"status": "timeout", "completed_by": "timeout"}
             await asyncio.to_thread(share.wait_user, min(1.0, remaining))
 
-    async def _done_when_matches(self, done_when: dict) -> bool:
+    def _page_for_done_when(self) -> Page | None:
+        context = self._context
+        origin = self._handoff_origin_ids
+        if context is not None:
+            opened = [
+                page
+                for page in context.pages
+                if not page.is_closed() and id(page) not in origin
+            ]
+            if opened:
+                return opened[-1]
         page = self._page
+        if page is not None and not page.is_closed():
+            return page
+        if context is not None:
+            for page in reversed(list(context.pages)):
+                if not page.is_closed():
+                    return page
+        return None
+
+    async def _done_when_matches(self, done_when: dict) -> bool:
+        page = self._page_for_done_when()
         if page is None:
             return False
         if "url_matches" in done_when:
-            return re.search(str(done_when["url_matches"]), page.url) is not None
+            return re.search(str(done_when["url_matches"]), _url_for_match(page.url)) is not None
         if "selector_present" in done_when:
-            count = await page.locator(str(done_when["selector_present"])).count()
-            return count > 0
+            locator = page.locator(str(done_when["selector_present"])).locator("visible=true")
+            return await locator.count() > 0
         if "text_present" in done_when:
-            count = await page.get_by_text(str(done_when["text_present"])).count()
-            return count > 0
+            locator = page.get_by_text(str(done_when["text_present"])).locator("visible=true")
+            return await locator.count() > 0
         return False
 
     async def ensure_started(self) -> None:

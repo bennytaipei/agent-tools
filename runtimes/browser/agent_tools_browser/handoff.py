@@ -326,18 +326,51 @@ def _host_value(name: str, default: str) -> str:
     return raw
 
 
+def _selector_syntax_ok(selector: str) -> bool:
+    """Cheap bracket and quote check. Runtime selector errors stay in the poll."""
+
+    if "\x00" in selector or not selector.strip():
+        return False
+    pairs = {")": "(", "]": "[", "}": "{"}
+    opening = set(pairs.values())
+    stack: list[str] = []
+    quote = ""
+    escaped = False
+    for char in selector:
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {'"', "'"}:
+            quote = char
+            continue
+        if char in opening:
+            stack.append(char)
+        elif char in pairs:
+            if not stack or stack[-1] != pairs[char]:
+                return False
+            stack.pop()
+    return not stack and not quote
+
+
 def prepare_done_when(done_when: dict | None) -> None:
-    """Reject a done_when URL pattern that is not a regular expression."""
+    """Reject a bad url_matches regex or an unbalanced selector up front."""
 
     if not done_when:
         return
     pattern = done_when.get("url_matches")
-    if not isinstance(pattern, str):
-        return
-    try:
-        re.compile(pattern)
-    except re.error as exc:
-        raise ShareError("done_when url_matches is not a regular expression") from exc
+    if isinstance(pattern, str):
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ShareError("done_when url_matches is not a regular expression") from exc
+    selector = done_when.get("selector_present")
+    if isinstance(selector, str) and not _selector_syntax_ok(selector):
+        raise ShareError("done_when selector_present is not a valid selector")
 
 
 def _optional_port(name: str) -> int | None:

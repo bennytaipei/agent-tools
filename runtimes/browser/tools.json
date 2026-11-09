@@ -45,7 +45,7 @@
   },
   {
     "name": "handoff",
-    "description": "The live page needs Benny, usually because it is a login wall. One call starts the share, notifies him, waits, and ends the share. Pass done_when to end the share when the page URL, a CSS selector, or text matches.",
+    "description": "The live page needs Benny, usually because it is a login wall. One call starts the share, notifies him, waits, and ends the share. Pass done_when to name the page after sign-in. url_matches ignores the query string and fragment. Only visible elements count.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -65,7 +65,7 @@
           "description": "Seconds to block while Benny has the browser."
         },
         "done_when": {
-          "description": "End the share when this condition matches. Polled about once a second while the share is open. The first check runs immediately.",
+          "description": "Names the page after sign-in, not the login page. Polled about once a second. Auto-complete only after the condition has been false at least once during this handoff and then true on two consecutive polls. A condition that is already true on the first poll does not auto-complete.",
           "oneOf": [
             {
               "type": "object",
@@ -77,7 +77,7 @@
                 "url_matches": {
                   "type": "string",
                   "minLength": 1,
-                  "description": "Regular expression matched against the page URL."
+                  "description": "Regular expression matched against the page URL without its query string or fragment (scheme://host[:port]/path). Name a post-login path."
                 }
               }
             },
@@ -91,7 +91,7 @@
                 "selector_present": {
                   "type": "string",
                   "minLength": 1,
-                  "description": "CSS selector that is present on the page."
+                  "description": "CSS selector for a visible element on the page after sign-in. Hidden elements do not count."
                 }
               }
             },
@@ -105,7 +105,7 @@
                 "text_present": {
                   "type": "string",
                   "minLength": 1,
-                  "description": "Text that is present on the page."
+                  "description": "Substring of text that is visible on the page after sign-in. Hidden text does not count."
                 }
               }
             }

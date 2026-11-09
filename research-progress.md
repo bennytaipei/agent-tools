@@ -1,38 +1,54 @@
 # Checkpoint
 
 Objective:
-Brief 8. The browser MCP launcher heals itself when the Podman VM / engine is down, with no human triage (Benny, Nov 9: "make this fix permanent and automatic").
+Brief 10. Stop browser.handoff from auto-completing on the login page, and make the macOS notify listener bring the default browser forward. Local commit only. Then brief 9 as a separate commit. Do not push. Do not stop the NABU VM (OMP pid 30858).
 
-Root cause (measured on NABU, Nov 9 2026):
-- OMP log omp.2026-11-09.30858.log: agent_browser failed 09:37:33.979 CST, reconnects failed 09:49:31, 09:50:07, 09:50:10, 09:50:13, final 09:50:19, all "MCP subprocess closed stdout before responding".
-- macOS unified log: an osascript dialog (the launcher's `ask` prompt) opened before each failure and a button was clicked ~1-2s later (AppKit sendAction), e.g. dialog 09:37:31.82, click 09:37:33.95, osascript exit 09:37:34.04. No podman machine VM came up. Benny then ran `podman machine start` by hand (zsh history); guest booted 09:50:36.
-- `podman machine list --format '{{.Name}} {{.Running}} {{.Default}}'` on podman 5.8.2 prints `podman-machine-default* true true`: the default machine's Name carries a trailing `*`.
-- The launcher passes that name to `podman machine start`. `podman machine start 'podman-machine-default*'` -> "Error: podman-machine-default*: VM does not exist", rc 125, in ~0.1s. The launcher then exits before any MCP handshake, so OMP shows only "not connected".
-- Falsify row run: inspect/start with the starred name fails (measured); the test stub never emits `*`, which is why tests passed.
+Root cause (measured, do not re-investigate):
+- Bug A. Invicti SSO handoff auto-completed on the login form. url_matches ran re.search on the full page URL, so a returnUrl or redirect_uri query that contains the post-login path matched. selector_present matched the login form on the first poll. _await_handoff returned auto_detected on the first true poll, and any poll exception returned share_failed.
+- Bug B. LaunchAgent com.agent-tools.browser-notify runs contrib/macos_notify.py, which ran `open <url>`. The default http handler is Safari. `open` events landed in Safari and nothing came to the front. The listener log only said "listening" because stderr is /tmp/agent-tools-browser-notify.log and requests were not logged.
 
-Frozen acceptance (brief 8):
-B1. Machine name from `machine list` has the trailing `*` stripped; test stub emits `*` like real podman 5.
-B2. AGENT_TOOLS_AUTO_START_ENGINE default `always`; ask/never still work.
-B3. After start (or when the machine is Running/Starting but info fails), wait until `<engine> info` succeeds, bounded by AGENT_TOOLS_ENGINE_START_TIMEOUT. A failed `machine start` (e.g. already starting by another launcher) still waits for info before failing.
-B4. Launcher never closes stdout before handshake when engine/image is not usable: a stdlib-only (python3.9-compatible) degraded MCP server answers initialize + tools/list (from a checked-in tools JSON snapshot kept in sync with catalog/ by a test) and returns tools/call as isError with the real reason and the fix. Each tools/call retries engine bring-up; on success it starts the container, replays initialize, and proxies the rest of the session.
-B5. Log file: ~/Library/Logs/agent-tools-browser.log (Darwin) or ${XDG_STATE_HOME:-~/.local/state}/agent-tools/browser.log; override AGENT_TOOLS_LOG_FILE. Timestamped decisions, engine command stderr, container stderr. Size-capped.
-B6. Tests: engine down -> auto-started; never up -> handshake ok and tools/call reason; recovers -> next tools/call proxied ok. Existing 53 repo + 25 runtime tests stay green; check.py green.
-B7. README docs updated. Pushed to main, CI green. Deployed to NABU and verified with VM really stopped (only if no live agent-tools container) or a fake-engine shim.
+Frozen acceptance (brief 10):
+A1. url_matches is tested against scheme://host[:port]/path only. Query and fragment are ignored. Documented in catalog/browser/handoff.yaml and the READMEs.
+A2. selector_present and text_present count only visible elements. text_present keeps substring semantics.
+A3. Auto-complete only after the condition was false at least once in this handoff, then true on two consecutive polls about 1s apart. Already true at the first poll logs a warning and does not auto-complete. No new result field (schema additionalProperties false).
+A4. Poll evaluation errors are no-match and reset the consecutive-true count. They do not end the handoff. share_failed stays for share failures and for a bad regex or selector rejected up front by prepare_done_when.
+A5. If the context gained pages during the handoff, evaluate the most recently opened page that is still open, else self._page.
+A6. handoff.yaml version 1.1.1. done_when describes the page after sign-in, not anything on the login page.
+A7. skills/browser-auth-handoff/SKILL.md and docs/agent-instructions/browser.md: prefer url_matches on a post-login path; never a selector or text that exists on the login page.
+A8. Regression tests (real Playwright, local pages) failed before the fix: query-string URL, SSO query URL, login selector, and hidden text auto-completed; selector `:::` returned share_failed; the SSO popup timed out. The login-to-/app/scans case already auto-completed on the first true poll.
+B1. Log every request and every command (exit code and stderr, timestamped) to stderr. Launchd writes that to /tmp/agent-tools-browser-notify.log.
+B2. Resolve the default http bundle from the LaunchServices secure plist, fallback com.apple.safari. Run `open -b <bundle> <url>` then `open -b <bundle>`. No osascript activate. Display dialog stays off unless AGENT_TOOLS_NOTIFY_DIALOG=1 and activation fails.
+B3. AGENT_TOOLS_NOTIFY_BROWSER overrides the bundle.
+B4. Tests in runtimes/browser/tests/test_macos_notify.py for bundle resolution, command list, logging, and override. No real `open`. Listener stays stdlib and 3.9-compatible.
+B5. check.py, repo pytest, and runtime pytest pass. Local commit on main.
 
 Current state:
-- Brief 8 implemented on main, local commit only (do not push). check.py, repo pytest (66), and runtime pytest (25) are green. Launcher tests cover the starred machine name, default always, readiness wait, degraded MCP, recovery proxy, missing image, and the log file.
-- NABU has a live agent-tools container (OMP session pid 30858), so do not stop the VM while it runs.
+- Brief 10 is ready to commit on main. New tests failed on the pre-fix code (recorded above), then passed after the fix.
+- check.py exit 0. Runtime pytest 33 passed. Repo pytest 66 passed.
+- NABU has a live agent-tools container (OMP session pid 30858). Do not stop the VM.
 
 Decisions:
-- Happy path unchanged: run the container directly when info succeeds and the image exists. Degraded server only on failed.
-- python3 is present on NABU (/usr/bin/python3 works, Homebrew python3 on PATH) and macstudio (/usr/bin/python3 3.9.6). Without python3, the launcher logs and exits as before.
-- Default AUTO_START is always. ask and never stay. --ensure-engine is the probe. AGENT_TOOLS_NO_DEGRADED=1 skips the degraded handoff.
-- Machine list format adds {{.Starting}}. A trailing * is stripped. Starting or Running means wait, do not start.
-- A non-zero machine start still waits for info. Unknown info failure (no stopped machine, not live) fails immediately rather than running the container.
-- Degraded MCP is newline-delimited JSON-RPC, tools from runtimes/browser/tools.json, Python 3.9 stdlib only.
+- Activation is a second `open -b <bundle>`, not `tell application id ... to activate`. Activate often prompts for Automation, which a background LaunchAgent cannot answer. This Linux host cannot run `open` or osascript; tests stub subprocess.run.
+- Display dialog default off. A modal dialog from a LaunchAgent is noisy and often not visible on the graphical session. Opt-in with AGENT_TOOLS_NOTIFY_DIALOG=1 only after the second `open -b` returns non-zero. The notification (title "Browser handoff", body = reason) stays.
+- Existing _handoff_auto_detects expected an already-true page to auto-complete immediately. That contradicts A3. It now navigates to /arm, which redirects to /landed, so each condition is false and then true.
+- Chrome is launched with --disable-popup-blocking so an SSO window.open is visible to the handoff poll.
+- tools.json was regenerated from catalog inputs. wait_for.yaml is unchanged.
+- Do not push. NABU deploy stays with the outer agent.
+
+Files changed:
+- catalog/browser/handoff.yaml, runtimes/browser/tools.json, runtimes/browser/agent_tools_browser/session.py, runtimes/browser/agent_tools_browser/handoff.py
+- runtimes/browser/contrib/macos_notify.py, runtimes/browser/tests/test_macos_notify.py, runtimes/browser/tests/test_runtime.py
+- README.md, runtimes/browser/README.md, docs/agent-instructions/browser.md, skills/browser-auth-handoff/SKILL.md, tests/test_check.py
+
+Commands that worked / failed:
+- Pre-fix: the new handoff and notify tests failed (8 failed, 17 deselected).
+- Post-fix: those tests passed (15 passed). Full runtime pytest 33 passed. check.py exit 0.
+- Repo pytest failed once on selector_present missing from browser.md. Re-run after the wording fix.
 
 Next action:
-Outer agent pushes main and, when the NABU container is not live, deploys and verifies with the Podman VM stopped. Do not push from this session.
+Commit brief 10 on main, then read /workspace/agent-tools-brief-9.md and do it as its own commit.
 
 Unresolved (non-blocking):
 - macstudio still on 2167ef1.
+- NABU has a live agent-tools container (OMP session pid 30858). Do not stop the VM.
+- Push and NABU verify stay with the outer agent. This Linux host cannot execute macOS `open` or osascript.

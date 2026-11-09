@@ -38,6 +38,7 @@ from agent_tools_browser.handoff import (
     PUBLIC_NOVNC_PORT_ENV,
     ShareError,
     listen_settings,
+    prepare_done_when,
 )
 from agent_tools_browser.processes import ProcessError, cmdline, pids_matching, port_is_open, reap
 from agent_tools_browser.session import (
@@ -99,6 +100,18 @@ def _start_site() -> ThreadingHTTPServer:
             if path == "/landed":
                 body = (
                     "<!DOCTYPE html><html><body><p>" + MARKER + "</p></body></html>"
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if path == "/arm":
+                body = (
+                    "<!DOCTYPE html><html><body><div>waiting</div>"
+                    "<script>setTimeout(function(){ location.replace('/landed'); }, 1200);</script>"
+                    "</body></html>"
                 ).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -353,6 +366,15 @@ def test_handoff_rejects_invalid_done_when_regex(tmp_path: Path) -> None:
     asyncio.run(_handoff_bad_regex(tmp_path))
 
 
+def test_prepare_done_when_rejects_unbalanced_selector() -> None:
+    with pytest.raises(ShareError):
+        prepare_done_when({"selector_present": "div["})
+
+
+def test_handoff_login_page_regressions(tmp_path: Path) -> None:
+    asyncio.run(_handoff_login_page_regressions(tmp_path))
+
+
 def test_read_viewports_scroll_and_restore(tmp_path: Path) -> None:
     asyncio.run(_read_viewports_scroll_and_restore(tmp_path))
 
@@ -499,20 +521,20 @@ async def _handoff_auto_detects(tmp_path: Path) -> None:
     hook_port = webhook.server_address[1]
     try:
         async with _client(profile, f"http://127.0.0.1:{hook_port}/hook") as client:
-            navigated = _payload(
-                await _call(client, "navigate", {"url": f"http://127.0.0.1:{site_port}/landed"})
-            )
-            assert navigated["url"].endswith("/landed")
             for done_when in (
                 {"text_present": MARKER},
                 {"selector_present": "p"},
                 {"url_matches": "/landed$"},
             ):
+                navigated = _payload(
+                    await _call(client, "navigate", {"url": f"http://127.0.0.1:{site_port}/arm"})
+                )
+                assert navigated["url"].endswith("/arm")
                 task = asyncio.create_task(
                     _call(
                         client,
                         "handoff",
-                        {"reason": "login wall", "timeout": 30, "done_when": done_when},
+                        {"reason": "login wall", "timeout": 15, "done_when": done_when},
                     )
                 )
                 payload = await _webhook_or_result(task, received)
@@ -548,6 +570,167 @@ async def _handoff_auto_detects(tmp_path: Path) -> None:
         site.server_close()
         webhook.server_close()
         reap(markers)
+
+
+def _start_auth_site() -> ThreadingHTTPServer:
+    class Handler(_QuietHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            path = urlsplit(self.path).path
+            port = self.server.server_address[1]
+            origin = f"http://127.0.0.1:{port}"
+            pages = {
+                "/app/login": (
+                    "<!DOCTYPE html><html><body><form>"
+                    '<input name="email" type="email">'
+                    '<button type="submit">Sign in</button>'
+                    "</form></body></html>"
+                ),
+                "/authorize": "<!DOCTYPE html><html><body><p>SSO</p></body></html>",
+                "/app/hidden": (
+                    "<!DOCTYPE html><html><body><p>Sign in</p>"
+                    '<span style="display:none">SIGNED_IN_SECRET</span>'
+                    "</body></html>"
+                ),
+                "/app/to-scans": (
+                    "<!DOCTYPE html><html><body><p>Sign in</p><script>"
+                    "setTimeout(function(){ location.replace('/app/scans'); }, 1200);"
+                    "</script></body></html>"
+                ),
+                "/app/scans": "<!DOCTYPE html><html><body><h1>Scans</h1></body></html>",
+                "/app/popup": (
+                    "<!DOCTYPE html><html><body><p>Sign in</p><script>"
+                    "setTimeout(function(){ window.open('" + origin + "/app/scans'); }, 1200);"
+                    "</script></body></html>"
+                ),
+                "/app/stable": "<!DOCTYPE html><html><body><p>Stable</p></body></html>",
+            }
+            body = pages.get(path)
+            if body is None:
+                self.send_error(404)
+                return
+            raw = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+    return _serve(Handler)
+
+
+async def _handoff_login_page_regressions(tmp_path: Path) -> None:
+    """Login-page done_when must not auto-complete. Real local pages."""
+
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    state = profile.parent / f"{profile.name}.runtime"
+    markers = [str(profile.resolve()), str(state.resolve())]
+    received: Queue[dict] = Queue()
+    site = _start_auth_site()
+    webhook = _start_webhook(received)
+    site_port = site.server_address[1]
+    hook_port = webhook.server_address[1]
+    origin = f"http://127.0.0.1:{site_port}"
+    failures: list[str] = []
+
+    async def handoff(done_when: dict, timeout: int):
+        task = asyncio.create_task(
+            _call(
+                client,
+                "handoff",
+                {"reason": "login wall", "timeout": timeout, "done_when": done_when},
+            )
+        )
+        payload = await _webhook_or_result(task, received)
+        assert payload["reason"] == "login wall"
+        result = await task
+        while True:
+            try:
+                received.get_nowait()
+            except Empty:
+                break
+        return result
+
+    async def check(name: str, coro) -> None:
+        try:
+            await coro
+        except Exception as exc:
+            failures.append(f"{name}: {exc}")
+
+    try:
+        async with _client(
+            profile, f"http://127.0.0.1:{hook_port}/hook", channel="chromium"
+        ) as client:
+            async def expect_timeout(url: str, done_when: dict, timeout: int = 3) -> None:
+                navigated = _payload(await _call(client, "navigate", {"url": url}))
+                assert navigated["url"].startswith(url.split("?", 1)[0].split("#", 1)[0])
+                result = await handoff(done_when, timeout)
+                assert result.is_error is False, result
+                assert _payload(result) == {"status": "timeout", "completed_by": "timeout"}
+
+            async def expect_auto(url: str, done_when: dict, timeout: int = 15) -> None:
+                await _call(client, "navigate", {"url": url})
+                result = await handoff(done_when, timeout)
+                assert result.is_error is False, result
+                body = _payload(result)
+                assert body == {
+                    "status": "done",
+                    "completed_by": "auto",
+                    "reason": "auto_detected",
+                }
+                _assert_output("browser.handoff", body)
+
+            pattern = "app/(scans|targets|dashboard|home)"
+            await check(
+                "query-url",
+                expect_timeout(
+                    f"{origin}/app/login?returnUrl=/app/scans/42#/app/home",
+                    {"url_matches": pattern},
+                ),
+            )
+            await check(
+                "sso-query",
+                expect_timeout(
+                    f"{origin}/authorize?redirect_uri=https://host.example/app/scans",
+                    {"url_matches": pattern},
+                ),
+            )
+            await check(
+                "login-selector",
+                expect_timeout(
+                    f"{origin}/app/login",
+                    {"selector_present": "input[name=email], button[type=submit]"},
+                ),
+            )
+            await check(
+                "hidden-text",
+                expect_timeout(
+                    f"{origin}/app/hidden",
+                    {"text_present": "SIGNED_IN_SECRET"},
+                ),
+            )
+            await check(
+                "login-to-scans",
+                expect_auto(f"{origin}/app/to-scans", {"url_matches": pattern}),
+            )
+            await check(
+                "eval-error",
+                expect_timeout(
+                    f"{origin}/app/stable",
+                    {"selector_present": ":::"},
+                ),
+            )
+            await check(
+                "sso-popup",
+                expect_auto(f"{origin}/app/popup", {"url_matches": pattern}),
+            )
+    finally:
+        site.shutdown()
+        webhook.shutdown()
+        site.server_close()
+        webhook.server_close()
+        reap(markers)
+    assert not failures, "; ".join(failures)
 
 
 async def _handoff_bad_regex(tmp_path: Path) -> None:

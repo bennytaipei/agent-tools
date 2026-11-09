@@ -14,6 +14,8 @@ An agent lists namespaces from `catalog/index.yaml` first. It loads a namespace'
 
 Namespaces today are `browser` (`catalog/browser/`): `browser.navigate`, `browser.read`, `browser.screenshot`, `browser.handoff`, `browser.click`, `browser.type`, `browser.scroll`, `browser.select`, `browser.wait_for`; and draft `teams` (`catalog/teams/`): `teams.send_message` at version `0.1.0`. Benny will replace that draft with the real Teams tools.
 
+`browser.handoff` matches `url_matches` against the page URL without the query string or fragment (`scheme://host[:port]/path`). `selector_present` and `text_present` count only visible elements.
+
 ## Contract
 
 `schema/manifest.schema.json` (JSON Schema draft 2020-12) is the contract for every manifest. `additionalProperties` is false. These fields are required:

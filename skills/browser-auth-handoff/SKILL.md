@@ -20,10 +20,10 @@ A 401, a 403, a redirect to a login or SSO page, or a sign-in form on a service 
    - Grok tool: `handoff` on the `browser` server. OMP tool: `mcp__agent_browser_handoff`.
    - `reason` says what the person has to finish, in plain language.
    - `timeout` is seconds, at least 1, and long enough for a person to sign in. This input is the tool wait. An MCP client timeout is a different setting.
-   - Pass `done_when` when you can name the signed-in page. Use one object:
-     - `url_matches`: a regular expression matched against the page URL
-     - `selector_present`: a CSS selector that is present on the page
-     - `text_present`: text that is present on the page
+   - Pass `done_when` for the page after sign-in. Prefer `url_matches` on a post-login path. Never use a selector or text that exists on the login page. Use one object:
+     - `url_matches`: a regular expression matched against the page URL without the query string or fragment
+     - `selector_present`: a CSS selector for a visible element on the page after sign-in
+     - `text_present`: visible text on the page after sign-in
 4. When `status` is `done`, continue the original task. Read screenshots, then click, type, scroll, select, and wait as the task requires.
    - Grok tools: `read`, `screenshot`, `click`, `type`, `scroll`, `select`, `wait_for`.
    - OMP tools: `mcp__agent_browser_read`, `mcp__agent_browser_screenshot`, `mcp__agent_browser_click`, `mcp__agent_browser_type`, `mcp__agent_browser_scroll`, `mcp__agent_browser_select`, `mcp__agent_browser_wait_for`.

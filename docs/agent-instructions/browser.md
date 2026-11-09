@@ -11,10 +11,12 @@ returned 401 or 403.
 
 Call handoff and wait. On Grok the tool is `handoff`. On OMP it is
 `mcp__agent_browser_handoff`. Pass a clear `reason`. Pass `done_when`
-when you can name the signed-in page: `url_matches` is a URL regular
-expression, `selector_present` is a CSS selector, and `text_present` is
-text on the page. Pass `timeout` in seconds, at least 1. That is how
-long the tool waits for the person.
+for the page after sign-in. Prefer `url_matches` on a post-login path.
+`url_matches` is tested against the URL without the query string or
+fragment. Never use `selector_present` or `text_present` for something
+that already exists on the login page. Only visible elements count.
+Pass `timeout` in seconds, at least 1. That is how long the tool waits
+for the person.
 
 When handoff returns `done`, continue the task. Read screenshots, then
 click, type, and use the other browser tools (`read`, `screenshot`,

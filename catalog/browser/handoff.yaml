@@ -1,6 +1,6 @@
 name: browser.handoff
-version: 1.1.0
-when_to_use: The live page needs Benny, usually because it is a login wall. One call starts the share, notifies him, waits, and ends the share. Pass done_when to end the share when the page URL, a CSS selector, or text matches.
+version: 1.1.1
+when_to_use: The live page needs Benny, usually because it is a login wall. One call starts the share, notifies him, waits, and ends the share. Pass done_when to name the page after sign-in. url_matches ignores the query string and fragment. Only visible elements count.
 inputs:
   type: object
   additionalProperties: false
@@ -17,7 +17,7 @@ inputs:
       minimum: 1
       description: Seconds to block while Benny has the browser.
     done_when:
-      description: End the share when this condition matches. Polled about once a second while the share is open. The first check runs immediately.
+      description: Names the page after sign-in, not the login page. Polled about once a second. Auto-complete only after the condition has been false at least once during this handoff and then true on two consecutive polls. A condition that is already true on the first poll does not auto-complete.
       oneOf:
         - type: object
           additionalProperties: false
@@ -27,7 +27,7 @@ inputs:
             url_matches:
               type: string
               minLength: 1
-              description: Regular expression matched against the page URL.
+              description: Regular expression matched against the page URL without its query string or fragment (scheme://host[:port]/path). Name a post-login path.
         - type: object
           additionalProperties: false
           required:
@@ -36,7 +36,7 @@ inputs:
             selector_present:
               type: string
               minLength: 1
-              description: CSS selector that is present on the page.
+              description: CSS selector for a visible element on the page after sign-in. Hidden elements do not count.
         - type: object
           additionalProperties: false
           required:
@@ -45,7 +45,7 @@ inputs:
             text_present:
               type: string
               minLength: 1
-              description: Text that is present on the page.
+              description: Substring of text that is visible on the page after sign-in. Hidden text does not count.
 outputs:
   type: object
   additionalProperties: false
@@ -72,10 +72,10 @@ outputs:
       type: string
       const: auto_detected
       description: Present when completed_by is auto.
-side_effects: Starts the HTTP noVNC share, shows a page with the banner "Sign in or finish the step, then click Done." and Done and Cancel buttons, notifies Benny, and blocks until he finishes, done_when matches, the timeout elapses, or the handoff is cancelled. Returns status and completed_by. When done_when matches, status is done, completed_by is auto, and reason is auto_detected. Ends the share itself in every case. No separate start, stop, notify, or status action.
+side_effects: Starts the HTTP noVNC share, shows a page with the banner "Sign in or finish the step, then click Done." and Done and Cancel buttons, notifies Benny, and blocks until he finishes, done_when has been false once in this handoff and then true on two consecutive polls, the timeout elapses, or the handoff is cancelled. url_matches is tested against the page URL without the query string or fragment. selector_present and text_present count only visible elements. A done_when that is already true on the first poll does not auto-complete. Returns status and completed_by. When auto-complete happens, status is done, completed_by is auto, and reason is auto_detected. Ends the share itself in every case. No separate start, stop, notify, or status action.
 errors:
   - code: share_failed
-    when: The HTTP noVNC share could not be started or ended, or done_when url_matches is not a valid regular expression.
+    when: The HTTP noVNC share could not be started or ended, done_when url_matches is not a valid regular expression, or done_when selector_present is not a valid selector.
   - code: notify_failed
     when: Benny could not be notified on the handoff channel.
 auth_needed:
