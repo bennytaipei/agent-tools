@@ -437,6 +437,10 @@ def test_handoff_login_page_regressions(tmp_path: Path) -> None:
     asyncio.run(_handoff_login_page_regressions(tmp_path))
 
 
+def test_handoff_viewer_canvas_scales_to_iframe(tmp_path: Path) -> None:
+    asyncio.run(_handoff_viewer_canvas_scales_to_iframe(tmp_path))
+
+
 def test_read_viewports_scroll_and_restore(tmp_path: Path) -> None:
     asyncio.run(_read_viewports_scroll_and_restore(tmp_path))
 
@@ -565,6 +569,122 @@ async def _fixed_ports_and_public_host(tmp_path: Path) -> None:
         webhook.shutdown()
         webhook.server_close()
         reap(markers)
+
+
+async def _handoff_viewer_canvas_scales_to_iframe(tmp_path: Path) -> None:
+    """The iframe must load noVNC and show a canvas scaled to the frame.
+
+    On 15e5f9e the viewer 404s vendor/pako, so no canvas is created.
+    """
+
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    state = profile.parent / f"{profile.name}.runtime"
+    markers = [str(profile.resolve()), str(state.resolve())]
+    received: Queue[dict] = Queue()
+    webhook = _start_webhook(received)
+    hook_port = webhook.server_address[1]
+    task: asyncio.Task | None = None
+    url: str | None = None
+    try:
+        async with _client(profile, f"http://127.0.0.1:{hook_port}/hook") as client:
+            task = asyncio.create_task(
+                _call(client, "handoff", {"reason": "login wall", "timeout": 60})
+            )
+            try:
+                payload = await _webhook_or_result(task, received)
+                url = payload["url"]
+                page = urllib.request.urlopen(url, timeout=5).read().decode()
+                _assert_handoff_chrome(page, "login wall")
+                await _assert_viewer_canvas(url)
+                request = urllib.request.Request(url + "/done", data=b"", method="POST")
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    assert response.status == 204
+                result = _payload(await task)
+                assert result == {"status": "done", "completed_by": "user"}
+            finally:
+                if task is not None and not task.done() and url is not None:
+                    try:
+                        request = urllib.request.Request(url + "/done", data=b"", method="POST")
+                        urllib.request.urlopen(request, timeout=5).close()
+                    except Exception:
+                        pass
+                    try:
+                        await asyncio.wait_for(task, timeout=10)
+                    except Exception:
+                        task.cancel()
+    finally:
+        webhook.shutdown()
+        webhook.server_close()
+        reap(markers)
+
+
+async def _assert_viewer_canvas(url: str) -> None:
+    from playwright.async_api import async_playwright
+
+    missing: list[str] = []
+
+    def note(response) -> None:
+        if response.status != 404:
+            return
+        frame = response.frame
+        if frame is None or frame.parent_frame is None:
+            return
+        path = urlsplit(response.url).path
+        if path.endswith("/favicon.ico"):
+            return
+        missing.append(response.url)
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        try:
+            page = await browser.new_page(
+                viewport={"width": 1280, "height": 720},
+                device_scale_factor=1,
+            )
+            page.on("response", note)
+            await page.goto(url, wait_until="domcontentloaded")
+            handle = await page.locator("iframe").element_handle()
+            assert handle is not None
+            frame = await handle.content_frame()
+            assert frame is not None
+            try:
+                await frame.wait_for_function(
+                    """() => {
+                      const canvas = document.querySelector('canvas');
+                      if (!canvas) return false;
+                      const box = canvas.getBoundingClientRect();
+                      return box.width > 0 && box.height > 0;
+                    }""",
+                    timeout=15000,
+                )
+            except Exception:
+                pass
+            assert missing == []
+            metrics = await frame.evaluate(
+                """() => {
+                  const canvas = document.querySelector('canvas');
+                  if (!canvas) return null;
+                  const box = canvas.getBoundingClientRect();
+                  return {
+                    w: box.width,
+                    h: box.height,
+                    iframeW: document.documentElement.clientWidth,
+                    iframeH: document.documentElement.clientHeight
+                  };
+                }"""
+            )
+            assert metrics is not None
+            assert metrics["w"] > 0 and metrics["h"] > 0
+            assert metrics["w"] <= metrics["iframeW"]
+            width_fits = abs(metrics["w"] - metrics["iframeW"]) <= 2
+            height_fits = abs(metrics["h"] - metrics["iframeH"]) <= 2
+            assert width_fits or height_fits, metrics
+        finally:
+            await browser.close()
 
 
 async def _handoff_auto_detects(tmp_path: Path) -> None:

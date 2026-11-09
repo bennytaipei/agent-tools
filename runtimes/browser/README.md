@@ -12,7 +12,7 @@ From the repo root, with nothing installed globally:
 uv run --project runtimes/browser python -m agent_tools_browser
 ```
 
-The default browser is the system binary `/usr/bin/google-chrome` (Playwright channel `chrome`). The process starts Xvfb on a free display and does not attach to a display that is already in use. `x11vnc` and `websockify` start only during `handoff`, use a free port, and stop when the call returns. websockify serves a small `view.html` plus the noVNC core modules from `/usr/share/novnc/core`. The frame scales to fit and does not show noVNC's control bar.
+The default browser is the system binary `/usr/bin/google-chrome` (Playwright channel `chrome`). The process starts Xvfb on a free display and does not attach to a display that is already in use. `x11vnc` and `websockify` start only during `handoff`, use a free port, and stop when the call returns. websockify serves a small `view.html` plus the noVNC trees that page imports (`core` and `vendor`, including pako) from `/usr/share/novnc`. The frame scales to fit and does not show noVNC's control bar.
 
 To run that server inside a container, register `runtimes/browser/bin/agent-tools-browser` instead of this command. The section below is that launcher.
 

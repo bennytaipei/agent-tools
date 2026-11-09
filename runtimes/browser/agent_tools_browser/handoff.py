@@ -435,26 +435,84 @@ _VIEW_HTML = """<!DOCTYPE html>
 """
 
 
-def _novnc_web_root(state_dir: Path) -> Path:
-    """Directory websockify serves: our viewer plus noVNC's core modules."""
+# Static import specifiers. view.html loads core/rfb.js, which pulls these in.
+_REL_IMPORT = re.compile(
+    r"""(?:import|from)\s+['"](\.[^'"]+)['"]|import\s*\(\s*['"](\.[^'"]+)['"]"""
+)
 
-    root = state_dir / "novnc-web"
-    root.mkdir(parents=True, exist_ok=True)
-    link = root / "core"
-    target = Path(NOVNC_WEB) / "core"
+
+def _novnc_import_roots(novnc_web: Path) -> list[str]:
+    """Top-level directories the viewer graph reaches outside core/.
+
+    noVNC 1.6 (this host) and 1.3 (bookworm image) leave core only through
+    vendor/pako. app/ and include/ are the stock UI and are not on this graph.
+    """
+
+    root = novnc_web.resolve()
+    start = novnc_web / "core" / "rfb.js"
+    if not start.is_file():
+        return []
+    queue = [start]
+    seen: set[Path] = set()
+    names: list[str] = []
+    seen_names: set[str] = set()
+    while queue:
+        path = queue.pop()
+        try:
+            key = path.resolve()
+        except OSError:
+            continue
+        if key in seen or not key.is_file():
+            continue
+        seen.add(key)
+        try:
+            top = key.relative_to(root).parts[0]
+        except ValueError:
+            continue
+        if top != "core" and top not in seen_names and (novnc_web / top).is_dir():
+            seen_names.add(top)
+            names.append(top)
+        try:
+            text = key.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        base = key.parent
+        for match in _REL_IMPORT.finditer(text):
+            spec = (match.group(1) or match.group(2)).split("?", 1)[0]
+            if spec.startswith("."):
+                queue.append(base / spec)
+    return names
+
+
+def _ensure_dir_link(link: Path, target: Path) -> None:
     desired = str(target)
     if link.is_symlink():
         if os.readlink(link) != desired:
             link.unlink()
             link.symlink_to(target, target_is_directory=True)
-    elif link.exists():
+        return
+    if link.exists():
         if link.is_dir():
             shutil.rmtree(link)
         else:
             link.unlink()
-        link.symlink_to(target, target_is_directory=True)
-    else:
-        link.symlink_to(target, target_is_directory=True)
+    link.symlink_to(target, target_is_directory=True)
+
+
+def _novnc_web_root(state_dir: Path) -> Path:
+    """Directory websockify serves: view.html plus the noVNC trees it imports."""
+
+    root = state_dir / "novnc-web"
+    root.mkdir(parents=True, exist_ok=True)
+    novnc = Path(NOVNC_WEB)
+    names = ["core"]
+    for name in _novnc_import_roots(novnc):
+        if name not in names:
+            names.append(name)
+    if (novnc / "vendor").is_dir() and "vendor" not in names:
+        names.append("vendor")
+    for name in names:
+        _ensure_dir_link(root / name, novnc / name)
     (root / "view.html").write_text(_VIEW_HTML, encoding="utf-8")
     return root
 
