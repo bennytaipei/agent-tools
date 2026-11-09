@@ -396,9 +396,9 @@ class BrowserSession:
                 try:
                     matched = await self._done_when_matches(done_when)
                 except Exception:
+                    # Unknown, not a miss. Do not arm the false-to-true guard.
                     log.warning("done_when poll failed", exc_info=True)
                     matched = False
-                    seen_false = True
                     consecutive_true = 0
                 else:
                     if matched and seen_false:

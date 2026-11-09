@@ -44,6 +44,7 @@ from agent_tools_browser.processes import ProcessError, cmdline, pids_matching, 
 from agent_tools_browser.session import (
     CHANNEL_ENV,
     READ_MAX_VIEWPORTS_DEFAULT,
+    BrowserSession,
     browser_channel,
     normalize_max_viewports,
     viewport_offsets,
@@ -289,6 +290,40 @@ def test_viewport_offsets() -> None:
     assert normalize_max_viewports(0) is None
     assert normalize_max_viewports(31) is None
     assert normalize_max_viewports(True) is None
+
+
+def test_handoff_eval_error_does_not_arm_transition() -> None:
+    asyncio.run(_handoff_eval_error_does_not_arm())
+
+
+async def _handoff_eval_error_does_not_arm() -> None:
+    """A poll error is unknown, not a false observation.
+
+    The condition is true, then one evaluation raises, then it is true again.
+    That must time out. It must not auto-complete.
+    """
+
+    session = BrowserSession()
+    polls = {"n": 0}
+
+    async def matches(_done_when: dict) -> bool:
+        polls["n"] += 1
+        if polls["n"] == 2:
+            raise RuntimeError("navigation")
+        return True
+
+    session._done_when_matches = matches  # type: ignore[method-assign]
+
+    class Share:
+        def user_result(self) -> None:
+            return None
+
+        def wait_user(self, timeout: float) -> None:
+            time.sleep(timeout)
+
+    result = await session._await_handoff(Share(), 4, {"selector_present": "p"})
+    assert result == {"status": "timeout", "completed_by": "timeout"}
+    assert polls["n"] >= 4
 
 
 def test_browser_channel_env(monkeypatch: pytest.MonkeyPatch) -> None:
