@@ -1,49 +1,46 @@
 # Checkpoint
 
 Objective:
-Brief 12. The handoff bar is fine, but the remote screen is blank because view.html's noVNC module graph 404s (`vendor/pako`). Link every tree that graph needs. One local commit. Do not push. Do not stop the NABU VM (OMP pid 30858).
+Brief 13. On NABU, Safari is the default http handler and `open -b com.apple.safari` exits 0, but Safari stays in the background with 0 windows while Google Chrome is frontmost. The handoff URL never appears. Fix macos_notify.py only, plus tests and the runtime README. One local commit on main. Do not push. Do not stop the NABU VM (OMP pid 30858).
 
-Frozen acceptance (brief 12):
-P1. websockify's web root links everything view.html imports. At least `vendor/`. Idempotent, same as the `core` link.
-P2. Confirmed core does not import `app/` or `include/` on this host's noVNC 1.6.0 (`/usr/share/novnc`) or on noVNC 1.3.0 (Debian bookworm image package, same `../vendor/pako` paths).
-P3. Bar design unchanged (one 40px bar, escaped reason, Done/Cancel posts).
-P4. Runtime test opens a real handoff page in Playwright Chromium, waits, and asserts no 404s for the iframe's resources and a canvas with nonzero size scaled to the iframe (width <= iframe width, and width or height within 2px of the iframe). That test fails on 15e5f9e and passes after the fix.
-P5. `uv run scripts/check.py`, repo pytest, and runtime pytest pass. One local commit. Print BRIEF12 DONE.
+Frozen acceptance (brief 13):
+P1. After each open, verify with System Events only (no app-specific AppleScript), `with timeout of 3 seconds`, whole check capped at about 4s. Poll about 250ms. Verified means that browser's process is frontmost and has at least one window.
+P2. If verification fails, fall back, skipping apps already tried and apps not installed: frontmost app when it is Google Chrome, Arc, Microsoft Edge, Brave Browser, Firefox, or Safari; then Google Chrome, Arc, Microsoft Edge, Brave Browser, Firefox. Each fallback uses `open -a <App> <url>` then activates the same way. Stop at the first verified app.
+P3. AGENT_TOOLS_HANDOFF_BROWSER (bundle id or app name) is tried first when set.
+P4. Log every attempt and its verify result, including `verify app=Safari frontmost=False windows=0 -> fallback`.
+P5. Notification and HTTP 204 stay. Send 204 before the slow open/verify work.
+P6. Tests: verified default does not fall back; wedged default (0 windows) uses Chrome; env override is first; System Events timeout is not verified; nothing verified still returns 204 and logs the last attempt.
+P7. Document in runtimes/browser/README.md.
+P8. check.py, repo pytest, and runtime pytest pass. One local commit. Print BRIEF13 DONE.
 
 Current state:
-- Local main is 15e5f9e. Brief 10 is 599e8f3. Poll-error fix is 9f07010. Auth store is 793d890. Slim page is 15e5f9e.
-- Host noVNC is 1.6.0. core/inflator.js and core/deflator.js import `../vendor/pako/lib/zlib/{inflate,deflate,zstream}.js`. Pako then imports siblings under `vendor/pako` only.
-- Bookworm novnc 1:1.3.0-1 (container image) installs the same `/usr/share/novnc/vendor/pako/lib/zlib/` files. Upstream v1.3.0 core imports only that vendor tree from outside core.
-- `_novnc_web_root` now walks core/rfb.js and symlinks each top-level tree it reaches. On this host that is `vendor` plus `core`.
-- The new viewer test failed on the unfixed tree: 404s for inflate.js, deflate.js, and zstream.js. After the link it passed in 4.70s.
-- check.py exited 0. Repo pytest 66 passed. Runtime pytest 41 passed in 115s.
+- Local main is 240196c (brief 12 vendor link). The listener now returns 204 after the notification, then verifies with System Events and falls back.
+- macos notify tests: 15 passed in 5.23s, including the wedged-Safari, env-override, timeout, none-verified, and 204-before-open cases.
 
 Decisions:
-- Walk view.html's module graph from `core/rfb.js` and symlink each top-level directory it reaches under `/usr/share/novnc`, plus `vendor` when that directory exists. Do not link `app/` or `include/`.
-- Do not bump handoff past 1.1.1. Do not change the bar CSS or button markup.
-- Do not push. NABU deploy stays with the outer agent.
+- Verify known bundles by process name (Safari, Google Chrome, Arc, Microsoft Edge, Brave Browser, Firefox). Unknown bundles use System Events' bundle identifier, ignoring case.
+- Activate with `open -b` / `open -a`, not `tell application ... to activate` (that prompts for Automation).
+- A System Events timeout (-1712 or subprocess timeout) ends that attempt as not verified.
+- Installation probe for the static fallback list is `mdfind`. The frontmost app is already running, so it is not probed.
+- This Linux host cannot run osascript. Tests use a fake command runner. NABU deploy stays with the outer agent.
 
 Files changed:
-- runtimes/browser/agent_tools_browser/handoff.py
-- runtimes/browser/tests/test_runtime.py
+- runtimes/browser/contrib/macos_notify.py
+- runtimes/browser/tests/test_macos_notify.py
 - runtimes/browser/README.md
 - research-progress.md
 
 Commands that worked / failed:
-- Host scan: only `../vendor/pako` leaves core.
-- Fetched noVNC v1.3.0 tarball. Same vendor imports. No app/include imports from core.
-- Bookworm file list includes `/usr/share/novnc/vendor/pako/lib/zlib/inflate.js` and the matching deflate and zstream files.
-- Viewer test on 15e5f9e failed: 404 inflate.js, deflate.js, zstream.js.
-- Viewer test after the link passed in 4.70s.
+- `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests/test_macos_notify.py -q` 15 passed in 5.23s.
 - `uv run scripts/check.py` exited 0.
 - `uv run --with pytest --with pyyaml --with jsonschema pytest -q` 66 passed.
-- `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` 41 passed in 115s.
+- `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` 47 passed in 101s.
 
 Next action:
-Commit brief 12 locally. Nothing further in this queue.
+Commit brief 13 locally. Nothing further in this queue.
 
 Unresolved (non-blocking):
 - macstudio still on 2167ef1.
 - NABU has a live agent-tools container (OMP session pid 30858). Do not stop the VM.
 - Push and NABU verify stay with the outer agent.
-- Linux cannot run macOS open or osascript.
+- Linux cannot run macOS open or osascript. Live Safari behavior is not executed here.

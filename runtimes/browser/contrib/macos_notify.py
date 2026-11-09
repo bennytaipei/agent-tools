@@ -2,8 +2,9 @@
 """macOS listener for browser handoff notifications.
 
 Binds 127.0.0.1. A POST of JSON {reason, url, expires_at} shows a notification
-and opens url in the default http browser, then returns 204. Stdlib only.
-The LaunchAgent sends stderr to /tmp/agent-tools-browser-notify.log.
+and returns 204, then opens url and checks that the browser is actually in
+front with a window. Stdlib only. The LaunchAgent sends stderr to
+/tmp/agent-tools-browser-notify.log.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import plistlib
 import re
 import subprocess
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,11 +24,38 @@ from urllib.parse import urlsplit
 
 PORT_ENV = "AGENT_TOOLS_MACOS_NOTIFY_PORT"
 BROWSER_ENV = "AGENT_TOOLS_NOTIFY_BROWSER"
+HANDOFF_BROWSER_ENV = "AGENT_TOOLS_HANDOFF_BROWSER"
 DIALOG_ENV = "AGENT_TOOLS_NOTIFY_DIALOG"
 DEFAULT_PORT = 8767
 SAFARI_BUNDLE = "com.apple.safari"
+VERIFY_BUDGET_S = 4.0
+VERIFY_POLL_S = 0.25
 _MAX_BODY = 65536
 _BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
+# Process names System Events reports. Safari is a frontmost candidate only.
+_KNOWN_BROWSERS = (
+    "Google Chrome",
+    "Arc",
+    "Microsoft Edge",
+    "Brave Browser",
+    "Firefox",
+    "Safari",
+)
+_FALLBACK_APPS = (
+    "Google Chrome",
+    "Arc",
+    "Microsoft Edge",
+    "Brave Browser",
+    "Firefox",
+)
+_BUNDLE_APP = {
+    "com.apple.safari": "Safari",
+    "com.google.chrome": "Google Chrome",
+    "company.thebrowser.browser": "Arc",
+    "com.microsoft.edgemac": "Microsoft Edge",
+    "com.brave.browser": "Brave Browser",
+    "org.mozilla.firefox": "Firefox",
+}
 _NOTIFY_SCRIPT = (
     'on run argv\n'
     'display notification (item 1 of argv) with title "Browser handoff"\n'
@@ -37,6 +66,74 @@ _DIALOG_SCRIPT = (
     'display dialog "Browser handoff" buttons {"Open"} default button "Open"\n'
     "end run"
 )
+# System Events only. App names and bundle ids arrive as argv, not as source.
+_VERIFY_SCRIPT = (
+    "on run argv\n"
+    "set kind to item 1 of argv\n"
+    "set target to item 2 of argv\n"
+    "with timeout of 3 seconds\n"
+    'tell application "System Events"\n'
+    'if kind is "bundle" then\n'
+    "ignoring case\n"
+    "set matches to (every application process whose bundle identifier is target)\n"
+    "end ignoring\n"
+    "else\n"
+    "set matches to (every application process whose name is target)\n"
+    "end if\n"
+    "if (count of matches) is 0 then\n"
+    'return "missing"\n'
+    "end if\n"
+    "set targetProc to item 1 of matches\n"
+    "set procName to name of targetProc\n"
+    "set isFront to frontmost of targetProc\n"
+    "set winCount to count of windows of targetProc\n"
+    "if isFront then\n"
+    'set frontText to "true"\n'
+    "else\n"
+    'set frontText to "false"\n'
+    "end if\n"
+    "return procName & \"|\" & frontText & \"|\" & (winCount as text)\n"
+    "end tell\n"
+    "end timeout\n"
+    "end run"
+)
+_FRONTMOST_SCRIPT = (
+    "on run argv\n"
+    "with timeout of 3 seconds\n"
+    'tell application "System Events"\n'
+    "set frontProc to first application process whose frontmost is true\n"
+    "return name of frontProc\n"
+    "end tell\n"
+    "end timeout\n"
+    "end run"
+)
+
+
+class _Gate:
+    """Lets tests wait until the open/verify work that follows 204 has finished."""
+
+    def __init__(self) -> None:
+        self._pending = 0
+        self._cv = threading.Condition()
+
+    def enter(self) -> None:
+        with self._cv:
+            self._pending += 1
+
+    def leave(self) -> None:
+        with self._cv:
+            self._pending -= 1
+            if self._pending == 0:
+                self._cv.notify_all()
+
+    def wait(self, timeout: float = 10) -> bool:
+        with self._cv:
+            if self._pending == 0:
+                return True
+            return self._cv.wait_for(lambda: self._pending == 0, timeout)
+
+
+_GATE = _Gate()
 
 
 class NotifyRequestError(ValueError):
@@ -60,8 +157,30 @@ def activate_command(bundle: str) -> list[str]:
     return ["open", "-b", bundle]
 
 
+def open_app_command(url: str, name: str) -> list[str]:
+    return ["open", "-a", name, url]
+
+
+def activate_app_command(name: str) -> list[str]:
+    return ["open", "-a", name]
+
+
+def verify_command(kind: str, target: str) -> list[str]:
+    return ["osascript", "-e", _VERIFY_SCRIPT, kind, target]
+
+
+def frontmost_command() -> list[str]:
+    return ["osascript", "-e", _FRONTMOST_SCRIPT]
+
+
 def dialog_command(url: str) -> list[str]:
     return ["osascript", "-e", _DIALOG_SCRIPT, url]
+
+
+def wait_for_opens(timeout: float = 10) -> bool:
+    """Block until open/verify work started after a 204 has finished."""
+
+    return _GATE.wait(timeout)
 
 
 def _launch_services_plist() -> Path:
@@ -92,19 +211,62 @@ def show_notification(reason: str) -> None:
 
 
 def open_in_browser(url: str) -> None:
+    """Open url and stop at the first browser that is frontmost with a window.
+
+    `open` exiting 0 does not mean a window appeared. Safari can swallow the
+    URL while Google Chrome stays in front. Activate with `open -b` or
+    `open -a` again. `tell application ... to activate` can prompt for
+    Automation, which a background LaunchAgent cannot answer.
+    """
+
     if not _http_url(url):
         raise NotifyRequestError("url must be an absolute http or https URL")
-    bundle = default_http_browser()
-    _check(_run(open_command(url, bundle)))
-    # `open -b` again asks LaunchServices to bring that app forward.
-    # `tell application id ... to activate` can prompt for Automation, which a
-    # background LaunchAgent cannot answer. A display dialog is opt-in.
-    focused = _run(activate_command(bundle))
-    if focused.returncode != 0 and _dialog_enabled():
+    tried: set[str] = set()
+    state = {"dialog": False}
+    for kind, target in _primary_targets():
+        if _attempt(url, kind, target, tried, state, require_installed=False):
+            return
+    front = _frontmost_browser()
+    if front is not None:
+        if _attempt(url, "app", front, tried, state, require_installed=False):
+            return
+    for name in _FALLBACK_APPS:
+        if _attempt(url, "app", name, tried, state, require_installed=True):
+            return
+
+
+def _attempt(
+    url: str,
+    kind: str,
+    target: str,
+    tried: set[str],
+    state: dict[str, bool],
+    require_installed: bool,
+) -> bool:
+    keys = _identity_keys(kind, target)
+    if tried.intersection(keys):
+        return False
+    label = _label(kind, target)
+    if require_installed and not _app_installed(label):
+        tried.update(keys)
+        _log_line(f"skip app={label} not installed")
+        return False
+    tried.update(keys)
+    if kind == "bundle":
+        _run(open_command(url, target))
+        focused = _run(activate_command(target))
+    else:
+        _run(open_app_command(url, target))
+        focused = _run(activate_app_command(target))
+    if focused.returncode != 0 and _dialog_enabled() and not state["dialog"]:
         _run(dialog_command(url))
+        state["dialog"] = True
+    return _poll_verified(kind, target, label)
 
 
 def handle_payload(payload: object) -> None:
+    """Notify, then open. HTTP callers send 204 before calling the open half."""
+
     reason, url, _expires_at = _required_fields(payload)
     _log_line(f"request reason={reason!r} url={url}")
     show_notification(reason)
@@ -154,14 +316,30 @@ class _Handler(BaseHTTPRequestHandler):
         _log_line(f"request POST path={self.path}")
         try:
             payload = _read_json(self)
-            handle_payload(payload)
+            reason, url, _expires_at = _required_fields(payload)
+            _log_line(f"request reason={reason!r} url={url}")
+            show_notification(reason)
         except NotifyRequestError:
             _send(self, 400)
             return
         except (subprocess.CalledProcessError, OSError):
             _send(self, 500)
             return
-        _send(self, 204)
+        # The runtime is waiting on this POST. Verify polls for seconds, so
+        # flush 204 before that work. The request thread keeps running it.
+        _GATE.enter()
+        try:
+            _send(self, 204)
+            try:
+                self.wfile.flush()
+            except OSError:
+                pass
+            try:
+                open_in_browser(url)
+            except Exception as exc:
+                _log_line(f"open failed error={exc}")
+        finally:
+            _GATE.leave()
 
     def do_GET(self) -> None:  # noqa: N802
         _log_line(f"request GET path={self.path}")
@@ -180,9 +358,15 @@ def _log_line(message: str) -> None:
         return
 
 
-def _run(args: list[str]) -> subprocess.CompletedProcess:
+def _run(args: list[str], timeout: float | None = None) -> subprocess.CompletedProcess:
     try:
-        result = subprocess.run(args, capture_output=True)
+        result = subprocess.run(args, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        err = ""
+        if exc.stderr:
+            err = exc.stderr.decode("utf-8", "replace").strip()
+        _log_line(f"command argv={args!r} exit=timeout stderr={err}")
+        raise
     except OSError as exc:
         _log_line(f"command argv={args!r} exit=error stderr={exc}")
         raise
@@ -251,6 +435,134 @@ def _required_fields(payload: object) -> tuple[str, str, str]:
     if "\x00" in reason:
         raise NotifyRequestError("reason")
     return reason, url, expires_at
+
+
+def _primary_targets() -> list[tuple[str, str]]:
+    targets: list[tuple[str, str]] = []
+    override = os.environ.get(HANDOFF_BROWSER_ENV, "").strip()
+    if override:
+        if _BUNDLE_RE.fullmatch(override) and "." in override:
+            targets.append(("bundle", override))
+        else:
+            targets.append(("app", override))
+    targets.append(("bundle", default_http_browser()))
+    return targets
+
+
+def _label(kind: str, target: str) -> str:
+    if kind == "app":
+        return target
+    return _BUNDLE_APP.get(target.lower(), target)
+
+
+def _identity_keys(kind: str, target: str) -> set[str]:
+    keys = set()
+    if kind == "bundle":
+        keys.add("bundle:" + target.lower())
+        app = _BUNDLE_APP.get(target.lower())
+        if app:
+            keys.add("app:" + app.lower())
+    else:
+        keys.add("app:" + target.lower())
+        for bundle, app in _BUNDLE_APP.items():
+            if app.lower() == target.lower():
+                keys.add("bundle:" + bundle)
+    return keys
+
+
+def _verify_query(kind: str, target: str) -> tuple[str, str]:
+    if kind == "app":
+        return "app", target
+    app = _BUNDLE_APP.get(target.lower())
+    if app:
+        return "app", app
+    return "bundle", target
+
+
+def _poll_verified(kind: str, target: str, label: str) -> bool:
+    query_kind, query_target = _verify_query(kind, target)
+    deadline = time.monotonic() + VERIFY_BUDGET_S
+    last_front = "False"
+    last_windows = "0"
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _log_line(
+                f"verify app={label} frontmost={last_front} windows={last_windows} -> fallback"
+            )
+            return False
+        try:
+            result = _run(
+                verify_command(query_kind, query_target),
+                timeout=min(VERIFY_BUDGET_S, remaining),
+            )
+        except subprocess.TimeoutExpired:
+            _log_line(f"verify app={label} frontmost=timeout windows=timeout -> fallback")
+            return False
+        if _result_timed_out(result):
+            _log_line(f"verify app={label} frontmost=timeout windows=timeout -> fallback")
+            return False
+        parsed = _parse_verify(result.stdout)
+        if parsed is not None:
+            name, front, windows = parsed
+            if name:
+                label = name
+            last_front = "True" if front else "False"
+            last_windows = str(windows)
+            if front and windows >= 1:
+                _log_line(f"verify app={label} frontmost=True windows={windows} -> ok")
+                return True
+        time.sleep(min(VERIFY_POLL_S, remaining))
+
+
+def _parse_verify(stdout: bytes) -> tuple[str, bool, int] | None:
+    text = stdout.decode("utf-8", "replace").strip()
+    if not text or text == "missing":
+        return None
+    parts = text.split("|")
+    if len(parts) != 3:
+        return None
+    try:
+        windows = int(parts[2])
+    except ValueError:
+        return None
+    return parts[0], parts[1].lower() == "true", windows
+
+
+def _result_timed_out(result: subprocess.CompletedProcess) -> bool:
+    if result.returncode == 0:
+        return False
+    err = ""
+    if result.stderr:
+        err = result.stderr.decode("utf-8", "replace").lower()
+    return "timeout" in err or "-1712" in err
+
+
+def _frontmost_browser() -> str | None:
+    try:
+        result = _run(frontmost_command(), timeout=VERIFY_BUDGET_S)
+    except (OSError, subprocess.TimeoutExpired):
+        _log_line("verify frontmost=timeout windows=timeout -> fallback")
+        return None
+    if result.returncode != 0:
+        if _result_timed_out(result):
+            _log_line("verify frontmost=timeout windows=timeout -> fallback")
+        return None
+    name = result.stdout.decode("utf-8", "replace").strip()
+    if name in _KNOWN_BROWSERS:
+        return name
+    return None
+
+
+def _app_installed(name: str) -> bool:
+    query = f"kMDItemDisplayName == '{name}'c && kMDItemKind == 'Application'"
+    try:
+        result = _run(["mdfind", query], timeout=VERIFY_BUDGET_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    return bool(result.stdout and result.stdout.strip())
 
 
 def _http_url(url: str) -> bool:
