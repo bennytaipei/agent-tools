@@ -2,8 +2,8 @@
 """macOS listener for browser handoff notifications.
 
 Binds 127.0.0.1. A POST of JSON {reason, url, expires_at} shows a notification
-and returns 204, then opens url and checks that the browser is actually in
-front with a window. Stdlib only. The LaunchAgent sends stderr to
+and returns 204, then opens url in one browser. A second browser is opened
+only when `open` itself fails. Stdlib only. The LaunchAgent sends stderr to
 /tmp/agent-tools-browser-notify.log.
 """
 
@@ -30,25 +30,17 @@ DIALOG_ENV = "AGENT_TOOLS_NOTIFY_DIALOG"
 DEFAULT_PORT = 8767
 SAFARI_BUNDLE = "com.apple.safari"
 VERIFY_BUDGET_S = 4.0
-VERIFY_POLL_S = 0.25
 LOCK_POLL_S = 2.0
 _MAX_BODY = 65536
 _BUNDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]*$")
-# Process names System Events reports. Safari is a frontmost candidate only.
+# Display names lsappinfo reports. Longest first so "Brave Browser" wins.
 _KNOWN_BROWSERS = (
-    "Google Chrome",
-    "Arc",
     "Microsoft Edge",
+    "Google Chrome",
     "Brave Browser",
     "Firefox",
     "Safari",
-)
-_FALLBACK_APPS = (
-    "Google Chrome",
     "Arc",
-    "Microsoft Edge",
-    "Brave Browser",
-    "Firefox",
 )
 _BUNDLE_APP = {
     "com.apple.safari": "Safari",
@@ -68,52 +60,10 @@ _DIALOG_SCRIPT = (
     'display dialog "Browser handoff" buttons {"Open"} default button "Open"\n'
     "end run"
 )
-# System Events only. App names and bundle ids arrive as argv, not as source.
-# Prefixed names: `set kind to` is error -10006 because `kind` is a property.
-_VERIFY_SCRIPT = (
-    "on run argv\n"
-    "set qKind to item 1 of argv\n"
-    "set qTarget to item 2 of argv\n"
-    "with timeout of 3 seconds\n"
-    'tell application "System Events"\n'
-    'if qKind is "bundle" then\n'
-    "ignoring case\n"
-    "set procList to (every application process whose bundle identifier is qTarget)\n"
-    "end ignoring\n"
-    "else\n"
-    "set procList to (every application process whose name is qTarget)\n"
-    "end if\n"
-    "if (count of procList) is 0 then\n"
-    'return "missing"\n'
-    "end if\n"
-    "set qProc to item 1 of procList\n"
-    "set procName to name of qProc\n"
-    "set isFront to frontmost of qProc\n"
-    "set winCount to count of windows of qProc\n"
-    "if isFront then\n"
-    'set frontText to "true"\n'
-    "else\n"
-    'set frontText to "false"\n'
-    "end if\n"
-    "return procName & \"|\" & frontText & \"|\" & (winCount as text)\n"
-    "end tell\n"
-    "end timeout\n"
-    "end run"
-)
-_FRONTMOST_SCRIPT = (
-    "on run argv\n"
-    "with timeout of 3 seconds\n"
-    'tell application "System Events"\n'
-    "set frontProc to first application process whose frontmost is true\n"
-    "return name of frontProc\n"
-    "end tell\n"
-    "end timeout\n"
-    "end run"
-)
 
 
 class _Gate:
-    """Lets tests wait until the open/verify work that follows 204 has finished."""
+    """Lets tests wait until the open work that follows 204 has finished."""
 
     def __init__(self) -> None:
         self._pending = 0
@@ -142,8 +92,6 @@ _GATE = _Gate()
 class _OpenState:
     def __init__(self) -> None:
         self.dialog = False
-        self.timeouts = 0
-        self.stop = False
 
 
 class NotifyRequestError(ValueError):
@@ -175,20 +123,12 @@ def activate_app_command(name: str) -> list[str]:
     return ["open", "-a", name]
 
 
-def verify_command(kind: str, target: str) -> list[str]:
-    return ["osascript", "-e", _VERIFY_SCRIPT, kind, target]
-
-
-def frontmost_command() -> list[str]:
-    return ["osascript", "-e", _FRONTMOST_SCRIPT]
-
-
 def dialog_command(url: str) -> list[str]:
     return ["osascript", "-e", _DIALOG_SCRIPT, url]
 
 
 def wait_for_opens(timeout: float = 10) -> bool:
-    """Block until open/verify work started after a 204 has finished."""
+    """Block until open work started after a 204 has finished."""
 
     return _GATE.wait(timeout)
 
@@ -221,77 +161,63 @@ def show_notification(reason: str) -> None:
 
 
 def open_in_browser(url: str, expires_at: str) -> None:
-    """Open url and stop at the first browser that is frontmost with a window.
+    """Open url in one browser.
 
     A locked screen is waited out until expires_at. No browser is opened while
-    the screen stays locked. `open` exiting 0 does not mean a window appeared.
-    Safari can swallow the URL while Google Chrome stays in front. Activate
-    with `open -b` or `open -a` again. `tell application ... to activate` can
-    prompt for Automation, which a background LaunchAgent cannot answer. Two
-    System Events verify timeouts in a row stop further fallbacks.
+    the screen stays locked. The choice is AGENT_TOOLS_HANDOFF_BROWSER, else
+    the frontmost known browser from lsappinfo, else the default http browser.
+    A second browser is tried only when the URL `open` returns non-zero.
+    Activate with `open -b` or `open -a` again. `tell application ... to
+    activate` can prompt for Automation, which a background LaunchAgent cannot
+    answer.
     """
 
     if not _http_url(url):
         raise NotifyRequestError("url must be an absolute http or https URL")
     if not _wait_for_unlock(expires_at):
         return
-    tried: set[str] = set()
+    primary = _primary_target()
     state = _OpenState()
-    for kind, target in _primary_targets():
-        if _attempt(url, kind, target, tried, state, require_installed=False):
-            return
-        if state.stop:
-            return
-    front = _frontmost_browser()
-    if front is not None:
-        if _attempt(url, "app", front, tried, state, require_installed=False):
-            return
-        if state.stop:
-            return
-    for name in _FALLBACK_APPS:
-        if state.stop:
-            return
-        if _attempt(url, "app", name, tried, state, require_installed=True):
-            return
+    if _open_target(url, primary, state):
+        return
+    fallback = _fallback_target(primary)
+    if fallback is None:
+        return
+    _log_line(f"open fallback app={_label(*fallback)}")
+    _open_target(url, fallback, state)
 
 
-def _attempt(
-    url: str,
-    kind: str,
-    target: str,
-    tried: set[str],
-    state: _OpenState,
-    require_installed: bool,
-) -> bool:
-    if state.stop:
-        return False
-    keys = _identity_keys(kind, target)
-    if tried.intersection(keys):
-        return False
-    label = _label(kind, target)
-    if require_installed and not _app_installed(label):
-        tried.update(keys)
-        _log_line(f"skip app={label} not installed")
-        return False
-    tried.update(keys)
+def _open_target(url: str, target: tuple[str, str], state: _OpenState) -> bool:
+    """Open url in target. True means do not try another browser."""
+
+    kind, name = target
+    label = _label(kind, name)
     if kind == "bundle":
-        _run(open_command(url, target))
-        focused = _run(activate_command(target))
+        argv = open_command(url, name)
+        activate = activate_command(name)
     else:
-        _run(open_app_command(url, target))
-        focused = _run(activate_app_command(target))
+        argv = open_app_command(url, name)
+        activate = activate_app_command(name)
+    try:
+        opened = _run(argv)
+    except (OSError, subprocess.TimeoutExpired):
+        _log_line(f"open app={label} exit=unavailable")
+        return True
+    if opened.returncode != 0:
+        _log_line(f"open failed app={label} exit={opened.returncode}")
+        return False
+    try:
+        focused = _run(activate)
+    except (OSError, subprocess.TimeoutExpired):
+        _log_line(f"open app={label} activate=unavailable")
+        return True
     if focused.returncode != 0 and _dialog_enabled() and not state.dialog:
-        _run(dialog_command(url))
+        try:
+            _run(dialog_command(url))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         state.dialog = True
-    ok, timed_out = _poll_verified(kind, target, label)
-    if timed_out:
-        state.timeouts += 1
-        if state.timeouts >= 2:
-            _log_line(f"verify unavailable; stopping after {label}")
-            state.stop = True
-    else:
-        state.timeouts = 0
-    return ok
+    return True
 
 
 def handle_payload(payload: object) -> None:
@@ -355,8 +281,8 @@ class _Handler(BaseHTTPRequestHandler):
         except (subprocess.CalledProcessError, OSError):
             _send(self, 500)
             return
-        # The runtime is waiting on this POST. Verify polls for seconds, so
-        # flush 204 before that work. The request thread keeps running it.
+        # The runtime is waiting on this POST. Unlock waits poll for seconds,
+        # so flush 204 before that work. The request thread keeps running it.
         _GATE.enter()
         try:
             _send(self, 204)
@@ -467,16 +393,45 @@ def _required_fields(payload: object) -> tuple[str, str, str]:
     return reason, url, expires_at
 
 
-def _primary_targets() -> list[tuple[str, str]]:
-    targets: list[tuple[str, str]] = []
+def _handoff_target() -> tuple[str, str] | None:
     override = os.environ.get(HANDOFF_BROWSER_ENV, "").strip()
-    if override:
-        if _BUNDLE_RE.fullmatch(override) and "." in override:
-            targets.append(("bundle", override))
-        else:
-            targets.append(("app", override))
-    targets.append(("bundle", default_http_browser()))
-    return targets
+    if not override:
+        return None
+    if _BUNDLE_RE.fullmatch(override) and "." in override:
+        return ("bundle", override)
+    return ("app", override)
+
+
+def _default_target() -> tuple[str, str]:
+    return ("bundle", default_http_browser())
+
+
+def _primary_target() -> tuple[str, str]:
+    chosen = _handoff_target()
+    if chosen is not None:
+        return chosen
+    front = _frontmost_browser_name()
+    if front:
+        return ("app", front)
+    return _default_target()
+
+
+def _fallback_target(primary: tuple[str, str]) -> tuple[str, str] | None:
+    """The one later candidate, after the URL open returned non-zero."""
+
+    front = _frontmost_browser_name()
+    candidates: list[tuple[str, str]] = []
+    if front:
+        candidates.append(("app", front))
+    candidates.append(_default_target())
+    for candidate in candidates:
+        if not _same_target(candidate, primary):
+            return candidate
+    return None
+
+
+def _same_target(left: tuple[str, str], right: tuple[str, str]) -> bool:
+    return bool(_identity_keys(*left).intersection(_identity_keys(*right)))
 
 
 def _label(kind: str, target: str) -> str:
@@ -498,76 +453,6 @@ def _identity_keys(kind: str, target: str) -> set[str]:
             if app.lower() == target.lower():
                 keys.add("bundle:" + bundle)
     return keys
-
-
-def _verify_query(kind: str, target: str) -> tuple[str, str]:
-    if kind == "app":
-        return "app", target
-    app = _BUNDLE_APP.get(target.lower())
-    if app:
-        return "app", app
-    return "bundle", target
-
-
-def _poll_verified(kind: str, target: str, label: str) -> tuple[bool, bool]:
-    """Return (verified, timed_out). A timeout ends the attempt immediately."""
-
-    query_kind, query_target = _verify_query(kind, target)
-    deadline = time.monotonic() + VERIFY_BUDGET_S
-    last_front = "False"
-    last_windows = "0"
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            _log_line(
-                f"verify app={label} frontmost={last_front} windows={last_windows} -> fallback"
-            )
-            return False, False
-        try:
-            result = _run(
-                verify_command(query_kind, query_target),
-                timeout=min(VERIFY_BUDGET_S, remaining),
-            )
-        except subprocess.TimeoutExpired:
-            _log_line(f"verify app={label} frontmost=timeout windows=timeout -> fallback")
-            return False, True
-        if _result_timed_out(result):
-            _log_line(f"verify app={label} frontmost=timeout windows=timeout -> fallback")
-            return False, True
-        parsed = _parse_verify(result.stdout)
-        if parsed is not None:
-            name, front, windows = parsed
-            if name:
-                label = name
-            last_front = "True" if front else "False"
-            last_windows = str(windows)
-            if front and windows >= 1:
-                _log_line(f"verify app={label} frontmost=True windows={windows} -> ok")
-                return True, False
-        time.sleep(min(VERIFY_POLL_S, remaining))
-
-
-def _parse_verify(stdout: bytes) -> tuple[str, bool, int] | None:
-    text = stdout.decode("utf-8", "replace").strip()
-    if not text or text == "missing":
-        return None
-    parts = text.split("|")
-    if len(parts) != 3:
-        return None
-    try:
-        windows = int(parts[2])
-    except ValueError:
-        return None
-    return parts[0], parts[1].lower() == "true", windows
-
-
-def _result_timed_out(result: subprocess.CompletedProcess) -> bool:
-    if result.returncode == 0:
-        return False
-    err = ""
-    if result.stderr:
-        err = result.stderr.decode("utf-8", "replace").lower()
-    return "timeout" in err or "-1712" in err
 
 
 def _find_locked(node: object) -> bool | None:
@@ -657,31 +542,56 @@ def _wait_for_unlock(expires_at: str) -> bool:
     return False
 
 
-def _frontmost_browser() -> str | None:
+def _lsappinfo_text(mode: str) -> str | None:
     try:
-        result = _run(frontmost_command(), timeout=VERIFY_BUDGET_S)
+        result = _run(["lsappinfo", mode], timeout=VERIFY_BUDGET_S)
     except (OSError, subprocess.TimeoutExpired):
-        _log_line("verify frontmost=timeout windows=timeout -> fallback")
         return None
-    if result.returncode != 0:
-        if _result_timed_out(result):
-            _log_line("verify frontmost=timeout windows=timeout -> fallback")
+    if result.returncode != 0 or not result.stdout:
         return None
-    name = result.stdout.decode("utf-8", "replace").strip()
-    if name in _KNOWN_BROWSERS:
-        return name
+    return result.stdout.decode("utf-8", "replace")
+
+
+def _canonical_browser(value: str) -> str | None:
+    folded = value.strip().casefold()
+    for name in _KNOWN_BROWSERS:
+        if name.casefold() == folded:
+            return name
     return None
 
 
-def _app_installed(name: str) -> bool:
-    query = f"kMDItemDisplayName == '{name}'c && kMDItemKind == 'Application'"
-    try:
-        result = _run(["mdfind", query], timeout=VERIFY_BUDGET_S)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    if result.returncode != 0:
-        return False
-    return bool(result.stdout and result.stdout.strip())
+def _known_browser_in(text: str) -> str | None:
+    """Pull a known browser display name out of lsappinfo text.
+
+    Quoted names win. A bundle id such as com.apple.safari is not a display name.
+    """
+
+    for quoted in re.findall(r'"([^"]*)"', text):
+        found = _canonical_browser(quoted)
+        if found:
+            return found
+    found = _canonical_browser(text)
+    if found:
+        return found
+    for name in _KNOWN_BROWSERS:
+        pattern = r"(?<![\w.])" + re.escape(name) + r"(?![\w.])"
+        if re.search(pattern, text, re.IGNORECASE):
+            return name
+    return None
+
+
+def _frontmost_browser_name() -> str | None:
+    """Frontmost known browser via lsappinfo. No System Events, no TCC prompt."""
+
+    front = _lsappinfo_text("front")
+    if front:
+        found = _known_browser_in(front)
+        if found:
+            return found
+    info = _lsappinfo_text("info")
+    if not info:
+        return None
+    return _known_browser_in(info)
 
 
 def _http_url(url: str) -> bool:

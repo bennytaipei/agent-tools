@@ -6,7 +6,6 @@ import importlib.util
 import json
 import plistlib
 import re
-import shutil
 import subprocess
 import threading
 import urllib.error
@@ -41,14 +40,6 @@ def _fast_clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
     return clock
 
 
-def _is_verify(args: list[str]) -> bool:
-    return len(args) >= 3 and args[0] == "osascript" and "count of windows" in args[2]
-
-
-def _is_frontmost(args: list[str]) -> bool:
-    return len(args) >= 3 and args[0] == "osascript" and "frontmost is true" in args[2]
-
-
 class _Calls:
     def __init__(self, codes: list[int] | None = None, stderrs: list[bytes] | None = None) -> None:
         self.commands: list[list[str]] = []
@@ -61,13 +52,10 @@ class _Calls:
             body = plistlib.dumps([{"CGSSessionScreenIsLocked": False}])
             return subprocess.CompletedProcess(args, 0, body, b"")
         if args and args[0] == "lsappinfo":
-            return subprocess.CompletedProcess(args, 0, b"Safari\n", b"")
+            return subprocess.CompletedProcess(args, 0, b"Terminal\n", b"")
         code = self.codes.pop(0) if self.codes else 0
         stderr = self.stderrs.pop(0) if self.stderrs else b""
-        stdout = b""
-        if code == 0 and _is_verify(args):
-            stdout = f"{args[-1]}|true|1".encode()
-        return subprocess.CompletedProcess(args, code, stdout, stderr)
+        return subprocess.CompletedProcess(args, code, b"", stderr)
 
 
 def _serve(monkeypatch: pytest.MonkeyPatch) -> tuple[object, _Calls]:
@@ -124,19 +112,15 @@ def test_post_notifies_and_opens(monkeypatch: pytest.MonkeyPatch) -> None:
         httpd.shutdown()
         httpd.server_close()
     assert status == 204
-    verify = macos_notify.verify_command("app", "Safari")
-    assert "with timeout of 3 seconds" in verify[2]
-    assert 'tell application "System Events"' in verify[2]
-    assert 'tell application "Safari"' not in verify[2]
-    assert "set kind to" not in verify[2]
-    assert verify[-1] == "Safari"
     assert calls.commands == [
         macos_notify.notification_command(reason),
         ["ioreg", "-n", "Root", "-d1", "-a"],
+        ["lsappinfo", "front"],
+        ["lsappinfo", "info"],
         ["open", "-b", "com.apple.safari", url],
         ["open", "-b", "com.apple.safari"],
-        verify,
     ]
+    assert all("System Events" not in " ".join(cmd) for cmd in calls.commands)
     assert calls.commands[0][0] == "osascript"
     assert reason in calls.commands[0]
     assert "Browser handoff" in calls.commands[0][2]
@@ -318,20 +302,19 @@ def _payload(url: str = "http://127.0.0.1:8765/h/token") -> dict[str, str]:
     }
 
 
-def _verify_lines(err: str) -> list[str]:
-    return [line for line in err.splitlines() if " verify app=" in line or line.startswith("verify app=")]
+def _url_opens(commands: list[list[str]], url: str) -> list[list[str]]:
+    return [cmd for cmd in commands if cmd and cmd[0] == "open" and url in cmd]
 
 
 class _Plan:
-    """Scripted open/osascript/mdfind results for fallback tests."""
+    """Scripted ioreg, lsappinfo, and open results."""
 
     def __init__(self) -> None:
         self.commands: list[list[str]] = []
-        self.verify: dict[str, subprocess.CompletedProcess[bytes] | Exception] = {}
         self.frontmost = b"Terminal\n"
-        self.installed: set[str] = set()
         self.lock_states: list[bool] = []
         self._lock_at = 0
+        self.url_open_codes: list[int] = []
 
     def _lock_body(self) -> bytes:
         if not self.lock_states:
@@ -347,20 +330,10 @@ class _Plan:
         if args and args[0] == "ioreg":
             return subprocess.CompletedProcess(args, 0, self._lock_body(), b"")
         if args and args[0] == "lsappinfo":
-            return subprocess.CompletedProcess(args, 0, b"Safari\n", b"")
-        if _is_verify(args):
-            planned = self.verify.get(args[-1])
-            if isinstance(planned, Exception):
-                raise planned
-            if planned is not None:
-                return planned
-            return subprocess.CompletedProcess(args, 0, b"missing", b"")
-        if _is_frontmost(args):
             return subprocess.CompletedProcess(args, 0, self.frontmost, b"")
-        if args and args[0] == "mdfind":
-            name = next((app for app in macos_notify._FALLBACK_APPS if app in args[1]), "")
-            body = f"/Applications/{name}.app\n".encode() if name in self.installed else b""
-            return subprocess.CompletedProcess(args, 0, body, b"")
+        if args and args[0] == "open" and len(args) >= 4:
+            code = self.url_open_codes.pop(0) if self.url_open_codes else 0
+            return subprocess.CompletedProcess(args, code, b"", b"")
         return subprocess.CompletedProcess(args, 0, b"", b"")
 
 
@@ -383,41 +356,11 @@ def _stop(httpd: object) -> None:
     httpd.server_close()
 
 
-def test_verified_default_browser_does_not_fall_back(
+def test_successful_open_does_not_open_another_browser(
     monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    httpd, calls = _serve(monkeypatch)
-    monkeypatch.setenv("AGENT_TOOLS_NOTIFY_BROWSER", "com.apple.safari")
-    port = httpd.server_address[1]
-    url = "http://127.0.0.1:8765/h/token"
-    try:
-        status = _post(port, _payload(url))
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
-    assert status == 204
-    opens = [cmd for cmd in calls.commands if cmd and cmd[0] == "open"]
-    assert opens == [
-        ["open", "-b", "com.apple.safari", url],
-        ["open", "-b", "com.apple.safari"],
-    ]
-    err = capfd.readouterr().err
-    assert "verify app=Safari frontmost=True windows=1 -> ok" in err
-    assert "-> fallback" not in err
-
-
-def test_wedged_default_falls_back_to_chrome(
-    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
-) -> None:
-    _fast_clock(monkeypatch)
     plan = _Plan()
-    plan.frontmost = b"Google Chrome\n"
-    plan.verify["Safari"] = subprocess.CompletedProcess(
-        [], 0, b"Safari|false|0", b""
-    )
-    plan.verify["Google Chrome"] = subprocess.CompletedProcess(
-        [], 0, b"Google Chrome|true|1", b""
-    )
+    plan.frontmost = b'ASN:0x0-0x1234: "Google Chrome"\n'
     httpd = _serve_plan(monkeypatch, plan)
     port = httpd.server_address[1]
     url = "http://127.0.0.1:8765/h/token"
@@ -426,49 +369,69 @@ def test_wedged_default_falls_back_to_chrome(
     finally:
         _stop(httpd)
     assert status == 204
-    assert ["open", "-b", "com.apple.safari", url] in plan.commands
-    assert ["open", "-a", "Google Chrome", url] in plan.commands
-    assert ["open", "-a", "Google Chrome"] in plan.commands
+    assert _url_opens(plan.commands, url) == [["open", "-a", "Google Chrome", url]]
+    assert ["open", "-b", "com.apple.safari", url] not in plan.commands
+    assert ["open", "-a", "Firefox", url] not in plan.commands
+    assert all("System Events" not in " ".join(cmd) for cmd in plan.commands)
+    err = capfd.readouterr().err
+    assert "open fallback" not in err
+    assert "-> fallback" not in err
+
+
+def test_open_failure_falls_back_once(
+    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    plan = _Plan()
+    plan.frontmost = b'ASN:0x0-0x1234: "Google Chrome"\n'
+    plan.url_open_codes = [1, 0]
+    httpd = _serve_plan(monkeypatch, plan)
+    port = httpd.server_address[1]
+    url = "http://127.0.0.1:8765/h/token"
+    try:
+        status = _post(port, _payload(url))
+    finally:
+        _stop(httpd)
+    assert status == 204
+    assert _url_opens(plan.commands, url) == [
+        ["open", "-a", "Google Chrome", url],
+        ["open", "-b", "com.apple.safari", url],
+    ]
+    assert ["open", "-a", "Google Chrome"] not in plan.commands
+    assert ["open", "-a", "Firefox", url] not in plan.commands
     assert ["open", "-a", "Arc", url] not in plan.commands
     err = capfd.readouterr().err
-    assert "verify app=Safari frontmost=False windows=0 -> fallback" in err
-    assert "verify app=Google Chrome frontmost=True windows=1 -> ok" in err
+    assert "open failed app=Google Chrome exit=1" in err
+    assert "open fallback app=Safari" in err
 
 
 def test_handoff_browser_env_is_tried_first(
     monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    httpd, calls = _serve(monkeypatch)
-    monkeypatch.setenv("AGENT_TOOLS_NOTIFY_BROWSER", "com.apple.safari")
-    monkeypatch.setenv(macos_notify.HANDOFF_BROWSER_ENV, "Google Chrome")
+    plan = _Plan()
+    plan.frontmost = b'ASN:0x0-0x1234: "Google Chrome"\n'
+    httpd = _serve_plan(monkeypatch, plan)
+    monkeypatch.setenv(macos_notify.HANDOFF_BROWSER_ENV, "Firefox")
     port = httpd.server_address[1]
     url = "http://127.0.0.1:8765/h/token"
     try:
         status = _post(port, _payload(url))
     finally:
-        httpd.shutdown()
-        httpd.server_close()
+        _stop(httpd)
     assert status == 204
-    opens = [cmd for cmd in calls.commands if cmd and cmd[0] == "open"]
-    assert opens[0] == ["open", "-a", "Google Chrome", url]
-    assert opens[1] == ["open", "-a", "Google Chrome"]
-    assert all(cmd[1] != "-b" for cmd in opens)
+    assert _url_opens(plan.commands, url) == [["open", "-a", "Firefox", url]]
+    assert ["open", "-a", "Google Chrome", url] not in plan.commands
+    assert ["open", "-b", "com.apple.safari", url] not in plan.commands
+    assert not any(cmd and cmd[0] == "lsappinfo" for cmd in plan.commands)
     err = capfd.readouterr().err
-    assert "verify app=Google Chrome frontmost=True windows=1 -> ok" in err
     assert "com.apple.safari" not in err
 
 
-def test_system_events_timeout_is_not_verified(
+def test_failed_open_without_a_next_candidate_stays_one_browser(
     monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
 ) -> None:
     plan = _Plan()
-    plan.frontmost = b"Google Chrome\n"
-    plan.verify["Safari"] = subprocess.CompletedProcess(
-        [], 1, b"", b"AppleEvent timed out (-1712)"
-    )
-    plan.verify["Google Chrome"] = subprocess.CompletedProcess(
-        [], 0, b"Google Chrome|true|1", b""
-    )
+    plan.frontmost = b"Terminal\n"
+    plan.url_open_codes = [1]
     httpd = _serve_plan(monkeypatch, plan)
     port = httpd.server_address[1]
     url = "http://127.0.0.1:8765/h/token"
@@ -477,39 +440,11 @@ def test_system_events_timeout_is_not_verified(
     finally:
         _stop(httpd)
     assert status == 204
-    assert ["open", "-a", "Google Chrome", url] in plan.commands
+    assert _url_opens(plan.commands, url) == [["open", "-b", "com.apple.safari", url]]
+    assert ["open", "-a", "Google Chrome", url] not in plan.commands
     err = capfd.readouterr().err
-    assert "verify app=Safari frontmost=timeout windows=timeout -> fallback" in err
-    assert "verify app=Google Chrome frontmost=True windows=1 -> ok" in err
-
-
-def test_no_verified_browser_still_returns_204(
-    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
-) -> None:
-    _fast_clock(monkeypatch)
-    plan = _Plan()
-    plan.frontmost = b"Terminal\n"
-    plan.installed.add("Google Chrome")
-    wedged = subprocess.CompletedProcess([], 0, b"Safari|false|0", b"")
-    plan.verify["Safari"] = wedged
-    plan.verify["Google Chrome"] = subprocess.CompletedProcess(
-        [], 0, b"Google Chrome|false|0", b""
-    )
-    httpd = _serve_plan(monkeypatch, plan)
-    port = httpd.server_address[1]
-    try:
-        status = _post(port, _payload())
-    finally:
-        _stop(httpd)
-    assert status == 204
-    err = capfd.readouterr().err
-    lines = _verify_lines(err)
-    assert lines
-    assert lines[-1].endswith("verify app=Google Chrome frontmost=False windows=0 -> fallback") or (
-        "verify app=Google Chrome frontmost=False windows=0 -> fallback" in lines[-1]
-    )
-    assert "-> ok" not in err
-    assert ["open", "-a", "Arc", "http://127.0.0.1:8765/h/token"] not in plan.commands
+    assert "open failed app=Safari exit=1" in err
+    assert "open fallback" not in err
 
 
 def test_post_returns_204_before_open_finishes(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -569,33 +504,23 @@ def _future_expiry(seconds: float) -> str:
 
 def test_applescript_set_targets_avoid_reserved_words() -> None:
     scripts = (
-        macos_notify._VERIFY_SCRIPT,
-        macos_notify._FRONTMOST_SCRIPT,
         macos_notify._NOTIFY_SCRIPT,
         macos_notify._DIALOG_SCRIPT,
     )
     for script in scripts:
+        assert "System Events" not in script
         for match in _SET_TARGET.finditer(script):
             word = match.group(1)
             assert word not in _DENIED_SET_WORDS, match.group(0)
-    verify = macos_notify._VERIFY_SCRIPT
-    assert "count of windows" in verify
-    assert "frontmost is true" not in verify
-    assert "set kind to" not in verify
-    assert "frontmost is true" in macos_notify._FRONTMOST_SCRIPT
 
 
-def test_verify_script_runs_without_reserved_word_error() -> None:
-    if shutil.which("osascript") is None:
-        pytest.skip("osascript is not installed")
-    result = subprocess.run(
-        macos_notify.verify_command("app", "AgentToolsNoSuchBrowser"),
-        capture_output=True,
-        timeout=15,
-    )
-    err = result.stderr.decode("utf-8", "replace")
-    assert "-10006" not in err
-    assert "-2741" not in err
+def test_lsappinfo_text_names_a_browser_without_system_events() -> None:
+    quoted = 'ASN:0x0-0x1234: "Google Chrome"'
+    assert macos_notify._known_browser_in(quoted) == "Google Chrome"
+    assert macos_notify._known_browser_in("Google Chrome\n") == "Google Chrome"
+    assert macos_notify._known_browser_in("com.apple.safari") is None
+    assert macos_notify._known_browser_in("loginwindow") is None
+    assert macos_notify._known_browser_in('ASN:0x0-0x1: "Arc"') == "Arc"
 
 
 def test_locked_then_unlocked_opens_default_once(
@@ -604,7 +529,6 @@ def test_locked_then_unlocked_opens_default_once(
     clock = _fast_clock(monkeypatch)
     plan = _Plan()
     plan.lock_states = [True, False]
-    plan.verify["Safari"] = subprocess.CompletedProcess([], 0, b"Safari|true|1", b"")
     httpd = _serve_plan(monkeypatch, plan)
     port = httpd.server_address[1]
     url = "http://127.0.0.1:8765/h/token"
@@ -615,13 +539,11 @@ def test_locked_then_unlocked_opens_default_once(
     finally:
         _stop(httpd)
     assert status == 204
-    url_opens = [cmd for cmd in plan.commands if cmd and cmd[0] == "open" and url in cmd]
-    assert url_opens == [["open", "-b", "com.apple.safari", url]]
+    assert _url_opens(plan.commands, url) == [["open", "-b", "com.apple.safari", url]]
     assert ["open", "-a", "Google Chrome", url] not in plan.commands
-    assert all(cmd[0] != "lsappinfo" for cmd in plan.commands)
+    assert all("System Events" not in " ".join(cmd) for cmd in plan.commands)
     err = capfd.readouterr().err
     assert "screen locked; waiting for unlock" in err
-    assert "verify app=Safari frontmost=True windows=1 -> ok" in err
     assert clock.now >= 2
 
 
@@ -646,33 +568,3 @@ def test_locked_until_expiry_opens_nothing(
     assert "screen locked; waiting for unlock" in err
     assert "screen locked; gave up" in err
     assert clock.now >= 2
-
-
-def test_verify_timeouts_stop_after_two_browsers(
-    monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
-) -> None:
-    plan = _Plan()
-    plan.frontmost = b"Google Chrome\n"
-    timed_out = subprocess.CompletedProcess([], 1, b"", b"AppleEvent timed out (-1712)")
-    plan.verify["Safari"] = timed_out
-    plan.verify["Google Chrome"] = timed_out
-    plan.verify["Firefox"] = timed_out
-    httpd = _serve_plan(monkeypatch, plan)
-    port = httpd.server_address[1]
-    url = "http://127.0.0.1:8765/h/token"
-    try:
-        status = _post(port, _payload(url))
-    finally:
-        _stop(httpd)
-    assert status == 204
-    url_opens = [cmd for cmd in plan.commands if cmd and cmd[0] == "open" and url in cmd]
-    assert url_opens == [
-        ["open", "-b", "com.apple.safari", url],
-        ["open", "-a", "Google Chrome", url],
-    ]
-    assert ["open", "-a", "Firefox", url] not in plan.commands
-    assert ["open", "-a", "Arc", url] not in plan.commands
-    err = capfd.readouterr().err
-    assert "verify app=Safari frontmost=timeout windows=timeout -> fallback" in err
-    assert "verify app=Google Chrome frontmost=timeout windows=timeout -> fallback" in err
-    assert "verify unavailable; stopping after Google Chrome" in err
