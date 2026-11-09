@@ -1,54 +1,67 @@
 # Checkpoint
 
 Objective:
-Brief 10. Stop browser.handoff from auto-completing on the login page, and make the macOS notify listener bring the default browser forward. Local commit only. Then brief 9 as a separate commit. Do not push. Do not stop the NABU VM (OMP pid 30858).
+Brief 11. Logins must survive container exit, restarts, and concurrent sessions. Local commits only. Then brief 9 (elegant handoff page) as its own commit. Do not push. Do not stop the NABU VM (OMP pid 30858).
 
-Root cause (measured, do not re-investigate):
-- Bug A. Invicti SSO handoff auto-completed on the login form. url_matches ran re.search on the full page URL, so a returnUrl or redirect_uri query that contains the post-login path matched. selector_present matched the login form on the first poll. _await_handoff returned auto_detected on the first true poll, and any poll exception returned share_failed.
-- Bug B. LaunchAgent com.agent-tools.browser-notify runs contrib/macos_notify.py, which ran `open <url>`. The default http handler is Safari. `open` events landed in Safari and nothing came to the front. The listener log only said "listening" because stderr is /tmp/agent-tools-browser-notify.log and requests were not logged.
+Root cause (measured on NABU, Nov 9, do not re-investigate):
+- One named volume `agent-tools-browser-profile` is the Chromium user-data-dir. Containers are `--rm`.
+- `_stop_browser` reaps Chrome before `context.close()` (0.5 s). Chromium flushes cookies on a ~30 s timer, so a session ended after ~3 s loses a Max-Age cookie; a session left up 40 s keeps it.
+- The launcher runs `podman stop -t 1` and the server has no SIGTERM handler, so aclose often never runs.
+- Session cookies (no Expires) never survive a fresh container.
+- A second container on the same profile takes SingletonLock. Two Chromiums then write one Cookies DB.
 
-Frozen acceptance (brief 10):
-A1. url_matches is tested against scheme://host[:port]/path only. Query and fragment are ignored. Documented in catalog/browser/handoff.yaml and the READMEs.
-A2. selector_present and text_present count only visible elements. text_present keeps substring semantics.
-A3. Auto-complete only after the condition was false at least once in this handoff, then true on two consecutive polls about 1s apart. Already true at the first poll logs a warning and does not auto-complete. No new result field (schema additionalProperties false).
-A4. Poll evaluation errors are no-match and reset the consecutive-true count. They do not end the handoff. share_failed stays for share failures and for a bad regex or selector rejected up front by prepare_done_when.
-A5. If the context gained pages during the handoff, evaluate the most recently opened page that is still open, else self._page.
-A6. handoff.yaml version 1.1.1. done_when describes the page after sign-in, not anything on the login page.
-A7. skills/browser-auth-handoff/SKILL.md and docs/agent-instructions/browser.md: prefer url_matches on a post-login path; never a selector or text that exists on the login page.
-A8. Regression tests (real Playwright, local pages) failed before the fix: query-string URL, SSO query URL, login selector, and hidden text auto-completed; selector `:::` returned share_failed; the SSO popup timed out. The login-to-/app/scans case already auto-completed on the first true poll.
-B1. Log every request and every command (exit code and stderr, timestamped) to stderr. Launchd writes that to /tmp/agent-tools-browser-notify.log.
-B2. Resolve the default http bundle from the LaunchServices secure plist, fallback com.apple.safari. Run `open -b <bundle> <url>` then `open -b <bundle>`. No osascript activate. Display dialog stays off unless AGENT_TOOLS_NOTIFY_DIALOG=1 and activation fails.
-B3. AGENT_TOOLS_NOTIFY_BROWSER overrides the bundle.
-B4. Tests in runtimes/browser/tests/test_macos_notify.py for bundle resolution, command list, logging, and override. No real `open`. Listener stays stdlib and 3.9-compatible.
-B5. check.py, repo pytest, and runtime pytest pass. Local commit on main.
+Frozen acceptance (brief 11):
+S1. Auth store at `{profile}/agent-tools-auth.json` (Playwright storage_state). Atomic tmp+rename under fcntl on `{profile}/agent-tools-auth.lock`. Merge: cookies keyed by (name, domain, path); this context's values win; keys it loaded or saw and no longer has are deleted; other keys stay. Drop expired. Same for localStorage per origin. IndexedDB if `storage_state(indexed_db=True)` works.
+S2. Save after each tools/call (at most once per 2 s), immediately when handoff ends, every 15 s while the browser is up, and on shutdown before the browser is killed.
+S3. Restore cookies (including session cookies) and localStorage right after the context starts.
+S4. Non-blocking fcntl on `{profile}/.agent-tools-primary.lock`. Primary clears stale SingletonLock/SingletonCookie/SingletonSocket and uses the profile dir. Secondary uses a private temp profile, seeded only from the auth store. Log the role.
+S5. SIGTERM/SIGINT/SIGHUP run aclose. Order: save, context.close (5 s), playwright.stop, then reap. Launcher closes container stdin and waits, then `stop -t 10`.
+S6. No tool-contract change. Document in runtimes/browser/README.md.
+S7. Failing runtime tests first: persistent cookie after immediate close; session cookie after restart; SIGTERM writes the store; two sessions, one primary, secondary cookie survives, logout deletes, unrelated cookie kept; stale SingletonLock does not block primary. Launcher tests expect the stop grace.
+S8. check.py, repo pytest, runtime pytest pass. Local commit. Print BRIEF11 DONE.
+S9. Own commit, separate from the auth store: a done_when evaluation error resets consecutive_true and does not set seen_false. Regression: true, then an evaluation error, then true again, must not auto-complete.
 
 Current state:
-- Brief 10 is ready to commit on main. New tests failed on the pre-fix code (recorded above), then passed after the fix.
-- check.py exit 0. Runtime pytest 33 passed. Repo pytest 66 passed.
-- NABU has a live agent-tools container (OMP session pid 30858). Do not stop the VM.
+- Brief 10 is local commit 599e8f3. Do not amend it.
+- S9 is local commit 9f07010. A done_when poll error no longer sets seen_false.
+- Auth store is implemented. check.py exited 0, repo pytest 66 passed, runtime pytest 39 passed in 91s.
+- Stale SingletonLock symlinked to otherhost-12345 did block Chromium until the primary unlinks SingletonLock, SingletonCookie, and SingletonSocket.
+- SIGTERM: cancelling MCP leaves the stdio task group blocked on stdin. aclose runs, then os._exit, so the process does not wait on the client.
+- Red run: `pytest runtimes/browser/tests/test_auth_persist.py` 5 failed in 78.87s. Persistent and session cookies were absent on the next session. SIGTERM left no agent-tools-auth.json. The second session's navigate failed (two Chromiums, one profile). A SingletonLock symlink to otherhost-12345 blocked launch (process_singleton_posix.cc: the profile appears to be in use on another computer). Launcher tests still see `stop -t 1`.
+- The concurrent test as written expects a logout in the secondary to stick while the primary still holds that cookie. That contradicts the merge rule. Rewrite it so the overlapping primary does not delete the secondary's cookie, and a later solo session performs the logout.
+- Stale foreign-host SingletonLock does block Chromium. Primary must unlink SingletonLock, SingletonCookie, and SingletonSocket before launch.
 
 Decisions:
-- Activation is a second `open -b <bundle>`, not `tell application id ... to activate`. Activate often prompts for Automation, which a background LaunchAgent cannot answer. This Linux host cannot run `open` or osascript; tests stub subprocess.run.
-- Display dialog default off. A modal dialog from a LaunchAgent is noisy and often not visible on the graphical session. Opt-in with AGENT_TOOLS_NOTIFY_DIALOG=1 only after the second `open -b` returns non-zero. The notification (title "Browser handoff", body = reason) stays.
-- Existing _handoff_auto_detects expected an already-true page to auto-complete immediately. That contradicts A3. It now navigates to /arm, which redirects to /landed, so each condition is false and then true.
-- Chrome is launched with --disable-popup-blocking so an SSO window.open is visible to the handoff poll.
-- tools.json was regenerated from catalog inputs. wait_for.yaml is unchanged.
+- The auth file lives on the profile directory the launcher already mounts, not a second volume.
+- Secondary markers must not include the shared profile path, or reap would kill the primary Chrome. Secondary gets its own state dir under the temp profile.
+- After each save, the delete baseline is this context's current keys, not the merged file.
+- localStorage origins missing from the current storage_state are not observed, so they are not cleared.
+- Display dialog and handoff matching rules from brief 10 stay as they are, except S9 (poll errors are unknown, not false).
+- Launcher grace is about 4s, only while RUN_PID is set, so happy-path tests do not sleep. `stop -t 10`.
 - Do not push. NABU deploy stays with the outer agent.
 
 Files changed:
-- catalog/browser/handoff.yaml, runtimes/browser/tools.json, runtimes/browser/agent_tools_browser/session.py, runtimes/browser/agent_tools_browser/handoff.py
-- runtimes/browser/contrib/macos_notify.py, runtimes/browser/tests/test_macos_notify.py, runtimes/browser/tests/test_runtime.py
-- README.md, runtimes/browser/README.md, docs/agent-instructions/browser.md, skills/browser-auth-handoff/SKILL.md, tests/test_check.py
+- research-progress.md
+- tests/test_browser_launcher.py (stop -t 10)
+- runtimes/browser/tests/test_auth_persist.py
+- runtimes/browser/tests/test_runtime.py (S9, already in 9f07010)
+- runtimes/browser/agent_tools_browser/auth_store.py
+- runtimes/browser/agent_tools_browser/session.py
+- runtimes/browser/agent_tools_browser/server.py
+- runtimes/browser/bin/agent-tools-browser
+- runtimes/browser/README.md
 
 Commands that worked / failed:
-- Pre-fix: the new handoff and notify tests failed (8 failed, 17 deselected).
-- Post-fix: those tests passed (15 passed). Full runtime pytest 33 passed. check.py exit 0.
-- Repo pytest failed once on selector_present missing from browser.md. Re-run after the wording fix.
+- Red, before the fix: auth persist 5 failed in 78.87s (cookies gone, no auth file after SIGTERM, second session navigation_failed, SingletonLock timeout). Launcher stop tests 3 failed (`stop -t 1`).
+- `uv run scripts/check.py` exited 0.
+- `uv run --with pytest --with pyyaml --with jsonschema pytest -q` 66 passed.
+- `uv run --project runtimes/browser --with pytest pytest runtimes/browser/tests -q` 39 passed in 91s.
 
 Next action:
-Commit brief 10 on main, then read /workspace/agent-tools-brief-9.md and do it as its own commit.
+Commit the auth store locally. Then read /workspace/agent-tools-brief-9.md and implement the handoff page as its own commit.
 
 Unresolved (non-blocking):
 - macstudio still on 2167ef1.
 - NABU has a live agent-tools container (OMP session pid 30858). Do not stop the VM.
-- Push and NABU verify stay with the outer agent. This Linux host cannot execute macOS `open` or osascript.
+- Brief 9 (elegant handoff page) waits until brief 11 is committed.
+- Push and NABU verify stay with the outer agent.

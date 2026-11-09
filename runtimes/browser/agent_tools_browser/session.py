@@ -8,13 +8,27 @@ import logging
 import math
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
+from agent_tools_browser.auth_store import (
+    baseline_from_state,
+    clear_stale_singleton,
+    cookie_for_browser,
+    fresh_cookies,
+    load_state,
+    local_storage_script,
+    next_save_seq,
+    release_primary,
+    save_merged,
+    try_primary,
+)
 from agent_tools_browser.handoff import (
     HandoffShare,
     NotifyError,
@@ -46,6 +60,8 @@ PROFILE_ENV = "AGENT_TOOLS_BROWSER_PROFILE"
 CHANNEL_ENV = "AGENT_TOOLS_BROWSER_CHANNEL"
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 READ_MAX_VIEWPORTS_DEFAULT = 10
+SAVE_DEBOUNCE_S = 2.0
+SAVE_INTERVAL_S = 15.0
 
 
 def _url_for_match(url: str) -> str:
@@ -195,6 +211,19 @@ class BrowserSession:
         self._handoff_origin_ids: set[int] = set()
         self._start_lock = asyncio.Lock()
         self._closed = False
+        self._home_state = self._state
+        self._home_markers = list(self._markers)
+        self._user_data: Path | None = None
+        self._private_profile: Path | None = None
+        self._primary_fd: int | None = None
+        self._role = ""
+        self._cookie_baseline: set[tuple[str, str, str]] = set()
+        self._storage_baseline: dict[str, set[str]] = {}
+        self._auth_lock = asyncio.Lock()
+        self._debounce_task: asyncio.Task[None] | None = None
+        self._periodic_task: asyncio.Task[None] | None = None
+        self._last_save_mono = 0.0
+        self._activity_gen = 0
 
     async def navigate(self, url: str) -> dict | str:
         if not is_http_url(url):
@@ -367,9 +396,15 @@ class BrowserSession:
             log.exception("handoff share failed")
             return "share_failed"
         finally:
-            await asyncio.to_thread(share.stop)
-            if self._share is share:
-                self._share = None
+            try:
+                await asyncio.to_thread(share.stop)
+            finally:
+                if self._share is share:
+                    self._share = None
+                try:
+                    await self.save_auth()
+                except Exception:
+                    log.exception("auth save after handoff failed")
         return outcome
 
     async def _await_handoff(
@@ -462,48 +497,241 @@ class BrowserSession:
             return await locator.count() > 0
         return False
 
+    def note_activity(self) -> None:
+        """Schedule an auth save. Call this on the event loop, after a tool call."""
+
+        if self._closed or self._context is None:
+            return
+        self._activity_gen += 1
+        task = self._debounce_task
+        if task is not None and not task.done():
+            return
+        now = time.monotonic()
+        if self._last_save_mono == 0.0 or now - self._last_save_mono >= SAVE_DEBOUNCE_S:
+            delay = 0.0
+        else:
+            delay = SAVE_DEBOUNCE_S - (now - self._last_save_mono)
+        try:
+            self._debounce_task = asyncio.create_task(self._debounced_save(delay))
+        except RuntimeError:
+            log.info("auth save not scheduled; the event loop is closed")
+
+    async def _debounced_save(self, delay: float) -> None:
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        if self._closed or self._context is None:
+            return
+        seen = self._activity_gen
+        try:
+            await self.save_auth()
+        except Exception:
+            log.exception("debounced auth save failed")
+            return
+        if self._closed or self._activity_gen == seen:
+            return
+        try:
+            self._debounce_task = asyncio.create_task(self._debounced_save(SAVE_DEBOUNCE_S))
+        except RuntimeError:
+            return
+
+    async def _periodic_save(self) -> None:
+        while not self._closed:
+            try:
+                await asyncio.sleep(SAVE_INTERVAL_S)
+            except asyncio.CancelledError:
+                return
+            if self._closed or self._context is None:
+                return
+            try:
+                await self.save_auth()
+            except Exception:
+                log.exception("periodic auth save failed")
+
+    def _start_periodic(self) -> None:
+        if self._periodic_task is not None and not self._periodic_task.done():
+            return
+        self._periodic_task = asyncio.create_task(self._periodic_save())
+
+    async def _cancel_background_saves(self) -> None:
+        tasks: list[asyncio.Task[None]] = []
+        for attr in ("_debounce_task", "_periodic_task"):
+            task = getattr(self, attr)
+            setattr(self, attr, None)
+            if task is not None and not task.done():
+                task.cancel()
+                tasks.append(task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def save_auth(self) -> None:
+        """Write this context into the shared store. Safe when shutdown already started."""
+
+        async with self._auth_lock:
+            context = self._context
+            profile = self._profile
+            if context is None or profile is None:
+                return
+            try:
+                try:
+                    state = await context.storage_state(indexed_db=True)
+                except TypeError:
+                    state = await context.storage_state()
+            except Exception:
+                log.exception("storage_state failed")
+                return
+            if not isinstance(state, dict):
+                return
+            seq = next_save_seq()
+            baseline_cookies = set(self._cookie_baseline)
+            baseline_storage = {
+                origin: set(names) for origin, names in self._storage_baseline.items()
+            }
+            try:
+                wrote = await asyncio.to_thread(
+                    save_merged,
+                    profile,
+                    baseline_cookies,
+                    baseline_storage,
+                    state,
+                    seq,
+                )
+            except Exception:
+                log.exception("auth store write failed")
+                return
+            if not wrote:
+                return
+            self._cookie_baseline, self._storage_baseline = baseline_from_state(state)
+            self._last_save_mono = time.monotonic()
+
+    async def _restore_auth(self) -> None:
+        assert self._context is not None and self._profile is not None
+        state = await asyncio.to_thread(load_state, self._profile)
+        now = time.time()
+        cookies = fresh_cookies(list(state.get("cookies") or []), now)
+        shaped = [cookie for cookie in (cookie_for_browser(item) for item in cookies) if cookie]
+        if shaped:
+            try:
+                await self._context.add_cookies(shaped)
+            except Exception:
+                log.exception("add_cookies failed; retrying one by one")
+                for cookie in shaped:
+                    try:
+                        await self._context.add_cookies([cookie])
+                    except Exception:
+                        log.warning("skipped cookie %s", cookie.get("name"))
+        origins: dict[str, dict[str, str]] = {}
+        for origin in state.get("origins") or []:
+            if not isinstance(origin, dict):
+                continue
+            key = origin.get("origin")
+            if not isinstance(key, str) or not key:
+                continue
+            items: dict[str, str] = {}
+            for item in origin.get("localStorage") or []:
+                if (
+                    isinstance(item, dict)
+                    and isinstance(item.get("name"), str)
+                    and isinstance(item.get("value"), str)
+                ):
+                    items[item["name"]] = item["value"]
+            if items:
+                origins[key] = items
+        if origins:
+            await self._context.add_init_script(local_storage_script(origins))
+        self._cookie_baseline, self._storage_baseline = baseline_from_state(
+            {"cookies": cookies, "origins": state.get("origins") or []}
+        )
+
+    async def _claim_profile(self) -> None:
+        assert self._profile is not None and self._home_state is not None
+        self._profile.mkdir(parents=True, exist_ok=True)
+        os.chmod(self._profile, 0o700)
+        self._primary_fd = await asyncio.to_thread(try_primary, self._profile)
+        if self._primary_fd is not None:
+            self._role = "primary"
+            self._user_data = self._profile
+            self._state = self._home_state
+            self._markers = list(self._home_markers)
+            self._private_profile = None
+        else:
+            self._role = "secondary"
+            private = await asyncio.to_thread(_private_profile_dir)
+            self._private_profile = private
+            self._user_data = private
+            self._state = private / "runtime"
+            # The shared profile path must not be a marker. Reap would kill the primary.
+            self._markers = _markers(private, self._state)
+        log.info("browser profile role %s", self._role)
+
+    def _release_profile_claim(self) -> None:
+        release_primary(self._primary_fd)
+        self._primary_fd = None
+        private = self._private_profile
+        self._private_profile = None
+        self._user_data = None
+        self._role = ""
+        self._state = self._home_state
+        self._markers = list(self._home_markers)
+        if private is not None:
+            shutil.rmtree(private, ignore_errors=True)
+
     async def ensure_started(self) -> None:
         async with self._start_lock:
             if self._closed:
                 raise ProcessError("browser session is closed")
             if self._context is not None:
                 return
-            if self._profile is None or self._state is None:
+            if self._profile is None or self._home_state is None:
                 raise ProcessError(f"{PROFILE_ENV} is not set")
             channel = browser_channel()
             if channel == "chrome" and not Path(CHROME_PATH).is_file():
                 raise ProcessError(f"system Chrome is not at {CHROME_PATH}")
-            self._profile.mkdir(parents=True, exist_ok=True)
-            self._state.mkdir(parents=True, exist_ok=True)
-            os.chmod(self._profile, 0o700)
-            os.chmod(self._state, 0o700)
             os.environ["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"] = "1"
-            self._display, self._auth, self._xvfb = await asyncio.to_thread(
-                _start_display, self._state, self._markers
-            )
             try:
+                await self._claim_profile()
+                assert self._state is not None and self._user_data is not None
+                self._state.mkdir(parents=True, exist_ok=True)
+                os.chmod(self._state, 0o700)
+                os.chmod(self._user_data, 0o700)
+                self._display, self._auth, self._xvfb = await asyncio.to_thread(
+                    _start_display, self._state, self._markers
+                )
                 self._playwright = await async_playwright().start()
+                if self._role == "primary":
+                    await asyncio.to_thread(clear_stale_singleton, self._profile)
                 self._context = await self._playwright.chromium.launch_persistent_context(
-                    str(self._profile),
+                    str(self._user_data),
                     **_launch_options(channel, self._display, self._auth),
                 )
+                await self._restore_auth()
                 if self._context.pages:
                     self._page = self._context.pages[0]
                 else:
                     self._page = await self._context.new_page()
                 self._page.set_default_navigation_timeout(15000)
+                self._start_periodic()
             except Exception:
                 await self._stop_browser()
+                self._release_profile_claim()
                 raise
 
     async def aclose(self) -> None:
         self._closed = True
+        await self._cancel_background_saves()
         share = self._share
         self._share = None
         if share is not None:
             await asyncio.to_thread(share.stop)
+        try:
+            await self.save_auth()
+        except Exception:
+            log.exception("auth save on shutdown failed")
         await self._stop_browser()
         await asyncio.to_thread(reap, self._markers)
+        self._release_profile_claim()
 
     async def _stop_browser(self) -> None:
         context = self._context
@@ -514,21 +742,19 @@ class BrowserSession:
         self._page = None
         self._xvfb = None
         self._has_page = False
-        # Kill the display and Chrome before asking Playwright to disconnect.
-        # A graceful close can outlast the MCP client's shutdown grace period.
-        await asyncio.to_thread(reap, self._markers)
-        if xvfb is not None:
-            await asyncio.to_thread(stop_tracked, xvfb, self._markers)
+        # Close Chrome first so the profile can flush. Reap only leftovers.
         if context is not None:
             try:
-                await asyncio.wait_for(context.close(), timeout=0.5)
+                await asyncio.wait_for(context.close(), timeout=5)
             except Exception:
                 log.info("browser context close did not finish cleanly")
         if playwright is not None:
             try:
-                await asyncio.wait_for(playwright.stop(), timeout=0.5)
+                await asyncio.wait_for(playwright.stop(), timeout=5)
             except Exception:
                 log.info("playwright stop did not finish cleanly")
+        if xvfb is not None:
+            await asyncio.to_thread(stop_tracked, xvfb, self._markers)
         await asyncio.to_thread(reap, self._markers)
 
 
@@ -566,6 +792,12 @@ def _launch_options(channel: str, display: str, auth: Path) -> dict:
         options["channel"] = "chrome"
         options["executable_path"] = CHROME_PATH
     return options
+
+
+def _private_profile_dir() -> Path:
+    path = Path(tempfile.mkdtemp(prefix="agent-tools-profile-"))
+    os.chmod(path, 0o700)
+    return path
 
 
 def _profile_dir() -> Path | None:

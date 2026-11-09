@@ -675,6 +675,7 @@ fi
 
 NAME="agent-tools-browser-$$-$(container_token)"
 RUN_PID=
+STDIN_DUP=
 
 cleanup() {
   trap '' EXIT HUP INT TERM
@@ -686,10 +687,25 @@ cleanup() {
     wait "$PORT_HOLDER" 2>/dev/null || true
     PORT_HOLDER=
   fi
+  # Close the container stdin first so the server can save and exit.
+  # The wait is only while that process is still running. A clean exit
+  # clears RUN_PID before this trap, so the happy path does not sleep.
   if [ -n "${RUN_PID:-}" ]; then
+    if [ -n "${STDIN_DUP:-}" ]; then
+      exec 3<&-
+      STDIN_DUP=
+    fi
+    grace=0
+    while [ "$grace" -lt 4 ]; do
+      if ! kill -0 "$RUN_PID" 2>/dev/null; then
+        break
+      fi
+      sleep 1
+      grace=$((grace + 1))
+    done
     kill "$RUN_PID" 2>/dev/null || true
   fi
-  "$ENGINE" stop -t 1 "$NAME" >/dev/null 2>&1 || true
+  "$ENGINE" stop -t 10 "$NAME" >/dev/null 2>&1 || true
   "$ENGINE" rm -f "$NAME" >/dev/null 2>&1 || true
   if [ -n "${RUN_PID:-}" ]; then
     wait "$RUN_PID" 2>/dev/null || true
@@ -767,6 +783,7 @@ fi
 # client stdin onto fd 3 and redirect from that fd so MCP stdio still reaches
 # the container, and the trap can run when this wait returns.
 exec 3<&0
+STDIN_DUP=1
 if [ -n "$STDERR_FIFO" ]; then
   "$ENGINE" "$@" <&3 3<&- 2>"$STDERR_FIFO" &
 else

@@ -20,7 +20,7 @@ To run that server inside a container, register `runtimes/browser/bin/agent-tool
 
 Set these in the server process. The repo never stores their values.
 
-- `AGENT_TOOLS_BROWSER_PROFILE`: directory for the persistent Chrome profile. The runtime also writes an X authority file and handoff token files under a sibling directory named `<profile-name>.runtime`.
+- `AGENT_TOOLS_BROWSER_PROFILE`: directory for the persistent Chrome profile and the shared auth store. The primary session also writes an X authority file and handoff token files under a sibling directory named `<profile-name>.runtime`. A second live session does not point Chrome at this directory. See Profile lock and auth store.
 - `AGENT_TOOLS_NOTIFY_WEBHOOK`: URL that receives one JSON POST when a handoff starts. The body is `reason`, `url`, and `expires_at`. No variable, or a failed POST, returns `notify_failed` and tears the share down.
 - `AGENT_TOOLS_BROWSER_CHANNEL`: `chrome` (the default when unset) uses system Chrome. `chromium` uses Playwright's bundled Chromium. Install that browser once with `uv run --project runtimes/browser playwright install chromium`. The container image sets `chromium` because linux/arm64 has no Google Chrome package.
 - `AGENT_TOOLS_HANDOFF_PORT`: TCP port the handoff page binds. Unset chooses a free port. `0` is rejected here. The container launcher, not this process, turns unset, empty, `0`, and `auto` into a published host port and passes that port as `AGENT_TOOLS_PUBLIC_HANDOFF_PORT`.
@@ -207,6 +207,18 @@ uv run --project runtimes/browser python runtimes/browser/contrib/smoke_containe
 ```
 
 `--engine docker` selects Docker. Omit `--engine` to use the launcher's automatic choice. The script runs `runtimes/browser/bin/agent-tools-browser --build`, then starts `runtimes/browser/bin/agent-tools-browser` with no arguments. It checks MCP initialize and tools/list for `navigate`, `read`, `screenshot`, `handoff`, `click`, `type`, `scroll`, `select`, and `wait_for`, and calls `navigate` on a page served from the host. It exits 2 when the requested engine is not on PATH, or when neither engine is available. It removes only the container and the profile volume it started.
+
+## Profile lock and auth store
+
+Logins are stored in `{AGENT_TOOLS_BROWSER_PROFILE}/agent-tools-auth.json`. In the container that path is `/var/lib/agent-tools/profile/agent-tools-auth.json`, on the profile volume the launcher already mounts. The file is a Playwright storage state: cookies (including session cookies with no expiry), per-origin localStorage, and IndexedDB when this Playwright build returns it from `storage_state(indexed_db=True)`.
+
+Each write is a merge. The server holds an exclusive fcntl lock on `agent-tools-auth.lock` in that directory, writes a temp file, and renames it into place. Cookies are keyed by name, domain, and path. Values from the session that is saving win. A cookie that session loaded or saved earlier, and no longer has, is removed, which is how logout sticks. Cookies that belong to another session stay. Expired cookies are dropped. localStorage follows the same rule per origin and key. An origin missing from the current snapshot was not visited, so its stored entries stay. When the snapshot includes IndexedDB for an origin, that copy replaces the stored one.
+
+The server saves after each tool call, at most once every 2 seconds, without dropping the last change. It also saves immediately when a handoff ends, every 15 seconds while the browser is up, and on shutdown before Chrome is closed. The next session restores those cookies, including session cookies, and restores localStorage once per tab.
+
+Only one Chromium uses the profile directory. The server takes a non-blocking fcntl lock on `.agent-tools-primary.lock`. The holder is the primary. It removes a stale `SingletonLock`, `SingletonCookie`, and `SingletonSocket`, then launches on the profile directory. A session that does not get the lock is the secondary. It uses a private temp directory, not the volume, seeded only from the auth store, and its own X authority files. The log line is `browser profile role primary` or `browser profile role secondary`. Shutting down a secondary does not signal the primary's Chrome.
+
+SIGTERM, SIGINT, and SIGHUP run that same shutdown: save, close the browser context (5 seconds), stop Playwright, stop Xvfb, then reap leftover processes. The launcher closes the container stdin, waits up to about 4 seconds for that exit, then stops the container with `stop -t 10` and removes it.
 
 ## Tests
 

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import signal
 import sys
 
 from mcp.server import Server, ServerRequestContext
@@ -47,14 +49,50 @@ class BrowserRuntime:
         )
 
     async def serve(self) -> None:
+        loop = asyncio.get_running_loop()
+        installed: list[signal.Signals] = []
+        exit_code = 0
         try:
             async with stdio_server() as (read_stream, write_stream):
-                await self._mcp.run(
-                    read_stream,
-                    write_stream,
-                    self._mcp.create_initialization_options(),
+                run_task = asyncio.create_task(
+                    self._mcp.run(
+                        read_stream,
+                        write_stream,
+                        self._mcp.create_initialization_options(),
+                    )
                 )
+
+                def _stop(code: int) -> None:
+                    nonlocal exit_code
+                    exit_code = code
+                    if not run_task.done():
+                        run_task.cancel()
+
+                for sig, code in (
+                    (signal.SIGINT, 130),
+                    (signal.SIGTERM, 143),
+                    (signal.SIGHUP, 129),
+                ):
+                    try:
+                        loop.add_signal_handler(sig, _stop, code)
+                    except (NotImplementedError, RuntimeError):
+                        log.warning("no signal handler for %s", sig)
+                    else:
+                        installed.append(sig)
+                try:
+                    await run_task
+                except asyncio.CancelledError:
+                    # stdin is still open, so the stdio task group would wait
+                    # forever. Save and close here, then leave the process.
+                    log.info("browser server stopping")
+                    for sig in installed:
+                        loop.remove_signal_handler(sig)
+                    installed.clear()
+                    await self._browser.aclose()
+                    os._exit(exit_code or 143)
         finally:
+            for sig in installed:
+                loop.remove_signal_handler(sig)
             await self._browser.aclose()
 
     async def _list_tools(
@@ -80,6 +118,13 @@ class BrowserRuntime:
         _ctx: ServerRequestContext,
         params: CallToolRequestParams,
     ) -> CallToolResult:
+        try:
+            return await self._call_tool_body(params)
+        finally:
+            # After dispatch, on this loop. Do not await the debounced save here.
+            self._browser.note_activity()
+
+    async def _call_tool_body(self, params: CallToolRequestParams) -> CallToolResult:
         qualified = self._by_mcp_name.get(params.name)
         if qualified is None:
             # Not a tool result code. The protocol reports an unknown method.

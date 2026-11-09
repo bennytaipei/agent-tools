@@ -297,7 +297,7 @@ def test_docker_on_linux_is_the_default(tmp_path: Path) -> None:
     assert ":U>" not in line
     assert "<AGENT_TOOLS_NOTIFY_WEBHOOK=http://host.docker.internal:8767/>" in line
     name, _handoff, _novnc = _assert_published(line, None, None)
-    assert f"<stop> <-t> <1> <{name}>" in text
+    assert f"<stop> <-t> <10> <{name}>" in text
     assert f"<rm> <-f> <{name}>" in text
     assert line.endswith(" <agent-tools-browser>")
     assert "host.containers.internal" not in line
@@ -841,7 +841,7 @@ def test_trap_cleanup_on_term(tmp_path: Path) -> None:
         os.kill(proc.pid, signal.SIGTERM)
         code = proc.wait(timeout=8)
         log = (work / "log").read_text(encoding="utf-8")
-        assert f"<stop> <-t> <1> <{name}>" in log
+        assert f"<stop> <-t> <10> <{name}>" in log
         assert f"<rm> <-f> <{name}>" in log
         assert code == 143, log
     finally:
@@ -873,9 +873,9 @@ def test_concurrent_launches_get_distinct_ports(tmp_path: Path) -> None:
             assert code == 0
         final_a = (tmp_path / "a" / "log").read_text(encoding="utf-8")
         final_b = (tmp_path / "b" / "log").read_text(encoding="utf-8")
-        assert f"<stop> <-t> <1> <{name_a}>" in final_a
+        assert f"<stop> <-t> <10> <{name_a}>" in final_a
         assert f"<rm> <-f> <{name_a}>" in final_a
-        assert f"<stop> <-t> <1> <{name_b}>" in final_b
+        assert f"<stop> <-t> <10> <{name_b}>" in final_b
         assert f"<rm> <-f> <{name_b}>" in final_b
     finally:
         hold.write_text("go\n", encoding="utf-8")
