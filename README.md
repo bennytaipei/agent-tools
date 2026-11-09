@@ -55,6 +55,8 @@ uv run --with pytest --with pyyaml --with jsonschema pytest -q
 
 The reference server and the container launcher live in `runtimes/browser/`. The launcher to register is `runtimes/browser/bin/agent-tools-browser`.
 
+The launcher starts a stopped Podman machine or Docker Desktop on its own (`AGENT_TOOLS_AUTO_START_ENGINE` defaults to `always`). It waits until the engine answers `info` and the image is present, then runs the container. If the engine or the image is still unusable, the process stays connected and answers MCP with the reason and a fix. When the browser tools fail, `tail ~/Library/Logs/agent-tools-browser.log`.
+
 ## Registering with agents
 
 Replace `__REPO_ROOT__` with the absolute path of this repo. The examples below do not set `AGENT_TOOLS_HANDOFF_PORT` or `AGENT_TOOLS_NOVNC_PORT`. Each session then publishes a free host port for the handoff page and another for noVNC. An empty value, `0`, and `auto` also pick a free port. The container still listens on `8765` and `8766`. `AGENT_TOOLS_NOTIFY_PORT` is optional. Leave it unset to keep `8767`.

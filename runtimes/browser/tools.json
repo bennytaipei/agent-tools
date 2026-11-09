@@ -1,0 +1,836 @@
+[
+  {
+    "name": "navigate",
+    "description": "Go to a URL in the remote browser.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Absolute URL to open."
+        }
+      }
+    }
+  },
+  {
+    "name": "read",
+    "description": "Read the current page by looking at the screenshots, the way a person looks at the screen. One image is one viewport. When truncated is true, call again with a higher max_viewports to see the rest of the page.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_viewports": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30,
+          "default": 10,
+          "description": "Maximum number of viewports to capture. Defaults to 10."
+        }
+      }
+    }
+  },
+  {
+    "name": "screenshot",
+    "description": "Capture the current page as an image.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {}
+    }
+  },
+  {
+    "name": "handoff",
+    "description": "The live page needs Benny, usually because it is a login wall. One call starts the share, notifies him, waits, and ends the share. Pass done_when to end the share when the page URL, a CSS selector, or text matches.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "timeout"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Why Benny is being handed the live browser."
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Seconds to block while Benny has the browser."
+        },
+        "done_when": {
+          "description": "End the share when this condition matches. Polled about once a second while the share is open. The first check runs immediately.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "url_matches"
+              ],
+              "properties": {
+                "url_matches": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Regular expression matched against the page URL."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "selector_present"
+              ],
+              "properties": {
+                "selector_present": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "CSS selector that is present on the page."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text_present"
+              ],
+              "properties": {
+                "text_present": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Text that is present on the page."
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "name": "click",
+    "description": "Click an element on the current page. target is a locator or a point in viewport CSS pixels from a browser.read screenshot.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target"
+      ],
+      "properties": {
+        "target": {
+          "description": "Element to click. A locator, or a point in viewport CSS pixels.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "role"
+              ],
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "ARIA role for Playwright get_by_role."
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Accessible name for get_by_role."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Text for Playwright get_by_text."
+                },
+                "exact": {
+                  "type": "boolean",
+                  "description": "When true, get_by_text matches the whole string."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "css"
+              ],
+              "properties": {
+                "css": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "CSS selector for Playwright locator."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "x",
+                "y"
+              ],
+              "properties": {
+                "x": {
+                  "type": "number",
+                  "description": "Horizontal viewport CSS pixel."
+                },
+                "y": {
+                  "type": "number",
+                  "description": "Vertical viewport CSS pixel."
+                },
+                "scroll_y": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y."
+                }
+              }
+            }
+          ]
+        },
+        "button": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "middle"
+          ],
+          "default": "left",
+          "description": "Mouse button."
+        },
+        "click_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10,
+          "default": 1,
+          "description": "Number of clicks."
+        },
+        "modifiers": {
+          "type": "array",
+          "description": "Modifier keys held during the click.",
+          "items": {
+            "type": "string",
+            "enum": [
+              "Alt",
+              "Control",
+              "Meta",
+              "Shift",
+              "ControlOrMeta"
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "name": "type",
+    "description": "Type text into an element on the current page. Omit target to type into the focused element.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text"
+      ],
+      "properties": {
+        "target": {
+          "description": "Element to type into. Omit it to type into the focused element. A locator, or a point in viewport CSS pixels.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "role"
+              ],
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "ARIA role for Playwright get_by_role."
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Accessible name for get_by_role."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Text for Playwright get_by_text."
+                },
+                "exact": {
+                  "type": "boolean",
+                  "description": "When true, get_by_text matches the whole string."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "css"
+              ],
+              "properties": {
+                "css": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "CSS selector for Playwright locator."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "x",
+                "y"
+              ],
+              "properties": {
+                "x": {
+                  "type": "number",
+                  "description": "Horizontal viewport CSS pixel."
+                },
+                "y": {
+                  "type": "number",
+                  "description": "Vertical viewport CSS pixel."
+                },
+                "scroll_y": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y."
+                }
+              }
+            }
+          ]
+        },
+        "text": {
+          "type": "string",
+          "description": "Text to type."
+        },
+        "clear": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, replace the element's current text."
+        },
+        "press_enter": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, press Enter after typing."
+        }
+      }
+    }
+  },
+  {
+    "name": "scroll",
+    "description": "Scroll the current page or a container. target scrolls that element into view, or scrolls that container when delta or to is set.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "description": "Element to scroll into view, or the container to scroll when delta or to is set. A locator, or a point in viewport CSS pixels.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "role"
+              ],
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "ARIA role for Playwright get_by_role."
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Accessible name for get_by_role."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Text for Playwright get_by_text."
+                },
+                "exact": {
+                  "type": "boolean",
+                  "description": "When true, get_by_text matches the whole string."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "css"
+              ],
+              "properties": {
+                "css": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "CSS selector for Playwright locator."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "x",
+                "y"
+              ],
+              "properties": {
+                "x": {
+                  "type": "number",
+                  "description": "Horizontal viewport CSS pixel."
+                },
+                "y": {
+                  "type": "number",
+                  "description": "Vertical viewport CSS pixel."
+                },
+                "scroll_y": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y."
+                }
+              }
+            }
+          ]
+        },
+        "delta": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Scroll by this many CSS pixels.",
+          "required": [
+            "dx",
+            "dy"
+          ],
+          "properties": {
+            "dx": {
+              "type": "number",
+              "description": "Horizontal scroll delta in CSS pixels."
+            },
+            "dy": {
+              "type": "number",
+              "description": "Vertical scroll delta in CSS pixels."
+            }
+          }
+        },
+        "to": {
+          "type": "string",
+          "enum": [
+            "top",
+            "bottom"
+          ],
+          "description": "Scroll to the top or the bottom of the page or target container."
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "target"
+          ]
+        },
+        {
+          "required": [
+            "delta"
+          ]
+        },
+        {
+          "required": [
+            "to"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "select",
+    "description": "Choose an option in a select element on the current page. Pass one of value, label, or index.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "description": "The select element. A locator, or a point in viewport CSS pixels.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "role"
+              ],
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "ARIA role for Playwright get_by_role."
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Accessible name for get_by_role."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Text for Playwright get_by_text."
+                },
+                "exact": {
+                  "type": "boolean",
+                  "description": "When true, get_by_text matches the whole string."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "css"
+              ],
+              "properties": {
+                "css": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "CSS selector for Playwright locator."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "x",
+                "y"
+              ],
+              "properties": {
+                "x": {
+                  "type": "number",
+                  "description": "Horizontal viewport CSS pixel."
+                },
+                "y": {
+                  "type": "number",
+                  "description": "Vertical viewport CSS pixel."
+                },
+                "scroll_y": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y."
+                }
+              }
+            }
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Option value to select."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Option label to select."
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Zero-based option index to select."
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "target",
+            "value"
+          ],
+          "properties": {
+            "label": false,
+            "index": false
+          }
+        },
+        {
+          "required": [
+            "target",
+            "label"
+          ],
+          "properties": {
+            "value": false,
+            "index": false
+          }
+        },
+        {
+          "required": [
+            "target",
+            "index"
+          ],
+          "properties": {
+            "value": false,
+            "label": false
+          }
+        }
+      ]
+    }
+  },
+  {
+    "name": "wait_for",
+    "description": "Wait until the current page shows a locator, hides a locator, contains text, matches a URL, or reaches a load state.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "description": "Locator to wait for. Use with state.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "role"
+              ],
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "ARIA role for Playwright get_by_role."
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Accessible name for get_by_role."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "Text for Playwright get_by_text."
+                },
+                "exact": {
+                  "type": "boolean",
+                  "description": "When true, get_by_text matches the whole string."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "css"
+              ],
+              "properties": {
+                "css": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "CSS selector for Playwright locator."
+                },
+                "nth": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "description": "Zero-based match when the locator matches more than one element."
+                }
+              }
+            }
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "visible",
+            "hidden"
+          ],
+          "description": "Wait until the locator is visible or hidden."
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Wait until this text is present."
+        },
+        "url_matches": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Regular expression matched against the page URL."
+        },
+        "load_state": {
+          "type": "string",
+          "enum": [
+            "load",
+            "domcontentloaded",
+            "networkidle"
+          ],
+          "description": "Playwright load state to wait for."
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 120000,
+          "default": 10000,
+          "description": "How long to wait, in milliseconds. Defaults to 10000."
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "target",
+            "state"
+          ],
+          "properties": {
+            "text": false,
+            "url_matches": false,
+            "load_state": false
+          }
+        },
+        {
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "target": false,
+            "state": false,
+            "url_matches": false,
+            "load_state": false
+          }
+        },
+        {
+          "required": [
+            "url_matches"
+          ],
+          "properties": {
+            "target": false,
+            "state": false,
+            "text": false,
+            "load_state": false
+          }
+        },
+        {
+          "required": [
+            "load_state"
+          ],
+          "properties": {
+            "target": false,
+            "state": false,
+            "text": false,
+            "url_matches": false
+          }
+        }
+      ]
+    }
+  }
+]

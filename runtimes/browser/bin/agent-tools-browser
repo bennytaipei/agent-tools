@@ -1,31 +1,99 @@
 #!/bin/sh
 # Launch the browser MCP server in Docker or Podman.
 # Stdio is the container's stdio. --build builds the image and exits.
-# A stopped Podman machine or Docker Desktop is started only with permission.
-# See runtimes/browser/README.md.
+# --ensure-engine brings the engine and image up, then exits.
+#
+# States:
+#   engine_down(kind, detail) — info failed and a stopped Podman machine
+#     or Docker Desktop can be started.
+#   starting — start was issued, or the machine is already Running or
+#     Starting while info still fails (a fresh boot).
+#   ready — engine info succeeded and the image exists. Only ready runs
+#     the container directly.
+#   failed(reason, fix) — the engine never became ready, start was
+#     refused, cancelled, or impossible to ask, the image is missing, or
+#     never-mode left the engine stopped. Hands off to the degraded MCP
+#     server (runtimes/browser/bin/agent-tools-browser-degraded).
+#
+# AGENT_TOOLS_AUTO_START_ENGINE defaults to always. ask and never keep
+# their previous behavior. See runtimes/browser/README.md.
 set -eu
 
 BASE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$BASE/../../.." && pwd)
 
+usage() {
+  printf '%s\n' "usage: agent-tools-browser [--build|--ensure-engine]" >&2
+}
+
+BUILD=0
+ENSURE=0
 if [ "$#" -gt 1 ]; then
-  echo "usage: agent-tools-browser [--build]" >&2
+  usage
   exit 2
 fi
-BUILD=0
 if [ "$#" -eq 1 ]; then
-  if [ "$1" != "--build" ]; then
-    echo "usage: agent-tools-browser [--build]" >&2
-    exit 2
-  fi
-  BUILD=1
+  case $1 in
+    --build) BUILD=1 ;;
+    --ensure-engine) ENSURE=1 ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
 fi
 
-AUTO_START=${AGENT_TOOLS_AUTO_START_ENGINE:-ask}
+# Logging must never break the launcher. Messages also go to stderr.
+init_log() {
+  LOG_FILE=${AGENT_TOOLS_LOG_FILE:-}
+  if [ -z "$LOG_FILE" ]; then
+    uname_s=$(uname -s 2>/dev/null || echo unknown)
+    if [ "$uname_s" = "Darwin" ]; then
+      LOG_FILE=${HOME:-/tmp}/Library/Logs/agent-tools-browser.log
+    else
+      state=${XDG_STATE_HOME:-${HOME:-/tmp}/.local/state}
+      LOG_FILE=$state/agent-tools/browser.log
+    fi
+  fi
+  if [ -z "$LOG_FILE" ]; then
+    LOG_FILE=/tmp/agent-tools-browser.log
+  fi
+  export AGENT_TOOLS_LOG_FILE="$LOG_FILE"
+  log_dir=$(dirname -- "$LOG_FILE" 2>/dev/null || true)
+  if [ -n "$log_dir" ]; then
+    mkdir -p "$log_dir" 2>/dev/null || true
+  fi
+  if [ -f "$LOG_FILE" ]; then
+    bytes=$(wc -c < "$LOG_FILE" 2>/dev/null || true)
+    bytes=${bytes##* }
+    case ${bytes:-} in
+      ""|*[!0-9]*) bytes=0 ;;
+    esac
+    if [ "$bytes" -gt 5242880 ]; then
+      if tail -c 1048576 "$LOG_FILE" > "$LOG_FILE.tail" 2>/dev/null; then
+        mv "$LOG_FILE.tail" "$LOG_FILE" 2>/dev/null || true
+      fi
+    fi
+  fi
+}
+
+log_line() {
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)
+  printf '%s %s %s\n' "$ts" "$$" "$1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+say() {
+  log_line "$1"
+  printf '%s\n' "$1" >&2 || true
+}
+
+init_log
+
+AUTO_START=${AGENT_TOOLS_AUTO_START_ENGINE:-always}
 case $AUTO_START in
   always|ask|never) ;;
   *)
-    echo "AGENT_TOOLS_AUTO_START_ENGINE must be always, ask, or never." >&2
+    say "AGENT_TOOLS_AUTO_START_ENGINE must be always, ask, or never."
     exit 2
     ;;
 esac
@@ -33,14 +101,43 @@ esac
 START_TIMEOUT=${AGENT_TOOLS_ENGINE_START_TIMEOUT:-120}
 case $START_TIMEOUT in
   *[!0-9]*)
-    echo "AGENT_TOOLS_ENGINE_START_TIMEOUT must be a positive integer." >&2
+    say "AGENT_TOOLS_ENGINE_START_TIMEOUT must be a positive integer."
     exit 2
     ;;
 esac
 if [ "$START_TIMEOUT" -lt 1 ]; then
-  echo "AGENT_TOOLS_ENGINE_START_TIMEOUT must be a positive integer." >&2
+  say "AGENT_TOOLS_ENGINE_START_TIMEOUT must be a positive integer."
   exit 2
 fi
+
+log_line "auto-start: $AUTO_START timeout ${START_TIMEOUT}s"
+
+# failed(reason, fix). Does not return.
+fail() {
+  reason=$1
+  fix=$2
+  log_line "state failed: $reason"
+  log_line "fix: $fix"
+  printf '%s\n' "$reason" >&2 || true
+  if [ "$ENSURE" -eq 1 ]; then
+    printf 'REASON:%s\nFIX:%s\n' "$reason" "$fix"
+    exit 1
+  fi
+  if [ "$BUILD" -eq 1 ] || [ "${AGENT_TOOLS_NO_DEGRADED:-}" = "1" ]; then
+    exit 1
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    log_line "python3 missing; exiting without a degraded server"
+    exit 1
+  fi
+  log_line "degraded handoff"
+  AGENT_TOOLS_DEGRADED_REASON=$reason
+  AGENT_TOOLS_DEGRADED_FIX=$fix
+  export AGENT_TOOLS_DEGRADED_REASON AGENT_TOOLS_DEGRADED_FIX
+  PYTHONUNBUFFERED=1
+  export PYTHONUNBUFFERED
+  exec python3 "$BASE/agent-tools-browser-degraded"
+}
 
 # A podman-docker shim answers `docker` but prints podman in its version or info.
 docker_is_podman_shim() {
@@ -55,8 +152,7 @@ docker_is_podman_shim() {
   return 1
 }
 
-# stdout of these probes stays off MCP stdout. stderr is discarded because
-# "unknown command" is the sign the feature is absent, not a user error.
+# stdout of these probes stays off MCP stdout.
 desktop_status_stopped() {
   status=$("$1" desktop status 2>/dev/null || true)
   case $status in
@@ -65,29 +161,40 @@ desktop_status_stopped() {
   return 1
 }
 
+# 0 when a stopped machine should be started (STOPPED_MACHINE set).
+# 1 when a machine is Running or Starting (MACHINE_PHASE=live), or when
+# there is nothing to start (MACHINE_PHASE=absent). A trailing * on the
+# default machine's name is Podman 5's marker and is not part of the name.
 podman_machine_stopped() {
   STOPPED_MACHINE=
+  MACHINE_PHASE=absent
   MACHINE_BIN=$ENGINE
   if [ "$STYLE" = "podman" ] && command -v podman >/dev/null 2>&1; then
     MACHINE_BIN=podman
   fi
-  list=$("$MACHINE_BIN" machine list --format '{{.Name}} {{.Running}} {{.Default}}' 2>/dev/null || true)
+  list=$("$MACHINE_BIN" machine list --format '{{.Name}} {{.Running}} {{.Starting}} {{.Default}}' 2>/dev/null || true)
   [ -n "$list" ] || return 1
   chosen=
+  live=0
   saved_ifs=$IFS
   IFS='
 '
   for line in $list; do
     [ -n "$line" ] || continue
     name=${line%% *}
+    case $name in
+      *\*) name=${name%\*} ;;
+    esac
     rest=${line#* }
     running=${rest%% *}
+    rest=${rest#* }
+    starting=${rest%% *}
     default=${rest#* }
     case $running in
-      true)
-        IFS=$saved_ifs
-        return 1
-        ;;
+      true) live=1 ;;
+    esac
+    case $starting in
+      true) live=1 ;;
     esac
     case $default in
       true) chosen=$name ;;
@@ -97,8 +204,15 @@ podman_machine_stopped() {
     fi
   done
   IFS=$saved_ifs
+  if [ "$live" -eq 1 ]; then
+    MACHINE_PHASE=live
+    log_line "podman machines: phase=live"
+    return 1
+  fi
   [ -n "$chosen" ] || return 1
   STOPPED_MACHINE=$chosen
+  MACHINE_PHASE=stopped
+  log_line "podman machines: phase=stopped name=$STOPPED_MACHINE"
   return 0
 }
 
@@ -131,10 +245,31 @@ ask_start() {
   return 1
 }
 
+INFO_LOGGED=0
+engine_info_ok() {
+  out=/tmp/agent-tools-info-$$
+  status=0
+  "$ENGINE" info >"$out" 2>&1 || status=$?
+  if [ "$status" -eq 0 ]; then
+    rm -f "$out" 2>/dev/null || true
+    return 0
+  fi
+  if [ "$INFO_LOGGED" -eq 0 ] && [ -s "$out" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      log_line "info: $line"
+      printf '%s\n' "$line" >&2 || true
+    done < "$out"
+    INFO_LOGGED=1
+  fi
+  rm -f "$out" 2>/dev/null || true
+  return "$status"
+}
+
 wait_until_ready() {
+  log_line "state starting: waiting for $ENGINE info (timeout ${START_TIMEOUT}s)"
   waited=0
   while :; do
-    if "$ENGINE" info >/dev/null 2>&1; then
+    if engine_info_ok; then
       return 0
     fi
     if [ "$waited" -ge "$START_TIMEOUT" ]; then
@@ -145,61 +280,140 @@ wait_until_ready() {
   done
 }
 
-# Start a stopped Podman machine or Docker Desktop, then wait until info works.
-# A daemon that is down for some other reason is left for the later exec.
-ensure_engine() {
-  if "$ENGINE" info >/dev/null 2>&1; then
+append_start_output() {
+  start_out=$1
+  if [ -s "$start_out" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      log_line "start: $line"
+      printf '%s\n' "$line" >&2 || true
+    done < "$start_out"
+  fi
+  rm -f "$start_out" 2>/dev/null || true
+}
+
+# Start a stopped Podman machine or Docker Desktop, or wait out a fresh
+# boot, until info succeeds. Calls fail and does not return otherwise.
+bring_up_engine() {
+  if engine_info_ok; then
+    log_line "engine info ok: $ENGINE"
     return 0
   fi
+  log_line "engine info failed: $ENGINE"
   kind=
   detail=
+  action=fail
   if [ "$STYLE" = "podman" ]; then
     if podman_machine_stopped; then
       kind=machine
       detail="The Podman machine is stopped."
+      action=start
+    elif [ "${MACHINE_PHASE:-}" = "live" ]; then
+      detail="The Podman machine is already running or starting."
+      action=wait
+    else
+      detail="podman info failed."
+      action=fail
     fi
   elif desktop_status_stopped "$ENGINE"; then
     kind=desktop
     detail="Docker Desktop is not running."
+    action=start
+  else
+    detail="$ENGINE info failed."
+    action=fail
   fi
-  [ -n "$kind" ] || return 0
 
+  if [ "$action" = "fail" ]; then
+    if [ "$STYLE" = "podman" ]; then
+      fail "$detail" 'Run `podman machine start`'
+    else
+      fail "$detail" "Run \`$ENGINE info\`"
+    fi
+  fi
+
+  if [ "$action" = "wait" ]; then
+    log_line "state starting: $detail"
+    if ! wait_until_ready; then
+      fail "Timed out after ${START_TIMEOUT}s waiting for ${ENGINE} to become ready." \
+        'Run `podman machine start`'
+    fi
+    log_line "engine info ok: $ENGINE"
+    return 0
+  fi
+
+  log_line "state engine_down: $kind $detail"
   case $AUTO_START in
     never)
-      echo "$detail Refusing to start it because AGENT_TOOLS_AUTO_START_ENGINE=never." >&2
-      exit 1
+      fail "$detail Refusing to start it because AGENT_TOOLS_AUTO_START_ENGINE=never." \
+        'Set AGENT_TOOLS_AUTO_START_ENGINE=always'
       ;;
     ask)
       rc=0
       ask_start "$detail Start it?" || rc=$?
       if [ "$rc" -eq 1 ]; then
-        echo "$detail Start was cancelled." >&2
-        exit 1
+        if [ "$kind" = "machine" ]; then
+          fix='Run `podman machine start`'
+        else
+          fix='Run `docker desktop start`'
+        fi
+        log_line "ask: cancelled"
+        fail "$detail Start was cancelled." "$fix"
       fi
       if [ "$rc" -ne 0 ]; then
-        echo "$detail No way to ask for permission. Set AGENT_TOOLS_AUTO_START_ENGINE=always to start it without asking." >&2
-        exit 1
+        log_line "ask: no way to ask"
+        fail "$detail No way to ask for permission. Set AGENT_TOOLS_AUTO_START_ENGINE=always to start it without asking." \
+          'Set AGENT_TOOLS_AUTO_START_ENGINE=always'
       fi
+      log_line "ask: start"
       ;;
   esac
 
-  # stdin is /dev/null so `podman machine start` does not prompt on MCP stdin.
-  # stdout is discarded so the start banner is not an MCP message.
+  log_line "state starting: $kind ${STOPPED_MACHINE:-}"
+  start_rc=0
+  start_out=/tmp/agent-tools-start-$$
+  : > "$start_out" || true
   if [ "$kind" = "machine" ]; then
-    if ! "$MACHINE_BIN" machine start "$STOPPED_MACHINE" </dev/null >/dev/null; then
-      echo "Podman machine failed to start." >&2
-      exit 1
-    fi
+    log_line "command: $MACHINE_BIN machine start $STOPPED_MACHINE"
+    "$MACHINE_BIN" machine start "$STOPPED_MACHINE" </dev/null >"$start_out" 2>&1 || start_rc=$?
   else
-    if ! "$ENGINE" desktop start </dev/null >/dev/null; then
-      echo "Docker Desktop failed to start." >&2
-      exit 1
+    log_line "command: $ENGINE desktop start"
+    "$ENGINE" desktop start </dev/null >"$start_out" 2>&1 || start_rc=$?
+  fi
+  append_start_output "$start_out"
+  if [ "$start_rc" -ne 0 ]; then
+    if [ "$kind" = "machine" ]; then
+      say "Podman machine failed to start."
+    else
+      say "Docker Desktop failed to start."
     fi
+    log_line "start exited $start_rc; waiting for $ENGINE info"
   fi
   if ! wait_until_ready; then
-    echo "Timed out after ${START_TIMEOUT}s waiting for ${ENGINE} to become ready." >&2
-    exit 1
+    if [ "$kind" = "machine" ]; then
+      fix='Run `podman machine start`'
+    else
+      fix='Run `docker desktop start`'
+    fi
+    fail "Timed out after ${START_TIMEOUT}s waiting for ${ENGINE} to become ready." "$fix"
   fi
+  log_line "engine info ok: $ENGINE"
+}
+
+image_ready() {
+  out=/tmp/agent-tools-image-$$
+  status=0
+  if [ "$STYLE" = "podman" ]; then
+    "$ENGINE" image exists "$IMAGE" >"$out" 2>&1 || status=$?
+  else
+    "$ENGINE" image inspect "$IMAGE" >"$out" 2>&1 || status=$?
+  fi
+  if [ "$status" -ne 0 ] && [ -s "$out" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      log_line "image: $line"
+    done < "$out"
+  fi
+  rm -f "$out" 2>/dev/null || true
+  return "$status"
 }
 
 ENGINE=${AGENT_TOOLS_CONTAINER_ENGINE:-}
@@ -229,9 +443,27 @@ else
   STYLE=podman
 fi
 
-ensure_engine
-
+log_line "engine chosen: $ENGINE style=$STYLE"
 IMAGE=${AGENT_TOOLS_IMAGE:-agent-tools-browser}
+
+bring_up_engine
+
+if [ "$BUILD" -eq 1 ]; then
+  log_line "command: $ENGINE build $IMAGE"
+  exec "$ENGINE" build -f "$ROOT/runtimes/browser/Containerfile" -t "$IMAGE" "$ROOT"
+fi
+
+if ! image_ready; then
+  log_line "image missing: $IMAGE"
+  fail "The image ${IMAGE} is missing." 'Run `agent-tools-browser --build`'
+fi
+log_line "state ready: $ENGINE image $IMAGE"
+
+if [ "$ENSURE" -eq 1 ]; then
+  log_line "ensure-engine ready"
+  exit 0
+fi
+
 # Ports inside the container. The image listens here. Published host ports
 # are chosen below and passed as AGENT_TOOLS_PUBLIC_* so the posted URL
 # uses the port Benny's browser can open.
@@ -258,10 +490,6 @@ else
   WEBHOOK="http://${ALIAS}:${NOTIFY}/"
 fi
 
-if [ "$BUILD" -eq 1 ]; then
-  exec "$ENGINE" build -f "$ROOT/runtimes/browser/Containerfile" -t "$IMAGE" "$ROOT"
-fi
-
 # Unset, empty, 0, and auto pick a free host port. Any other value is explicit.
 is_auto_port() {
   case ${1-} in
@@ -275,12 +503,12 @@ require_port() {
   value=$2
   case $value in
     *[!0-9]*)
-      echo "${label} is not a TCP port." >&2
+      say "${label} is not a TCP port."
       exit 2
       ;;
   esac
   if [ "$value" -lt 1 ] || [ "$value" -gt 65535 ]; then
-    echo "${label} is not a TCP port." >&2
+    say "${label} is not a TCP port."
     exit 2
   fi
 }
@@ -312,7 +540,7 @@ pick_port_scan() {
     fi
     port=$((port + 1))
   done
-  echo "no free TCP port" >&2
+  say "no free TCP port"
   return 1
 }
 
@@ -351,11 +579,11 @@ finally:
     while [ ! -s "$out" ]; do
       tries=$((tries + 1))
       if [ "$tries" -gt 100 ]; then
-        echo "could not pick a free port" >&2
+        say "could not pick a free port"
         exit 1
       fi
       if ! kill -0 "$PORT_HOLDER" 2>/dev/null; then
-        echo "could not pick a free port" >&2
+        say "could not pick a free port"
         exit 1
       fi
       sleep 0.05
@@ -406,6 +634,8 @@ fi
 PORT_HOLDER=
 PORT_RELEASE=
 PORT_FILE=
+STDERR_FIFO=
+TEE_PID=
 need=$((handoff_auto + novnc_auto))
 if [ "$need" -gt 0 ]; then
   PORT_FILE=/tmp/agent-tools-ports-$$
@@ -435,11 +665,11 @@ if [ "$need" -gt 0 ]; then
 fi
 
 if [ -z "${HANDOFF_HOST:-}" ] || [ -z "${NOVNC_HOST:-}" ]; then
-  echo "could not pick a free port" >&2
+  say "could not pick a free port"
   exit 1
 fi
 if [ "$HANDOFF_HOST" = "$NOVNC_HOST" ]; then
-  echo "handoff and noVNC ports must differ." >&2
+  say "handoff and noVNC ports must differ."
   exit 2
 fi
 
@@ -464,6 +694,15 @@ cleanup() {
   if [ -n "${RUN_PID:-}" ]; then
     wait "$RUN_PID" 2>/dev/null || true
     RUN_PID=
+  fi
+  if [ -n "${TEE_PID:-}" ]; then
+    kill "$TEE_PID" 2>/dev/null || true
+    wait "$TEE_PID" 2>/dev/null || true
+    TEE_PID=
+  fi
+  if [ -n "${STDERR_FIFO:-}" ]; then
+    rm -f "$STDERR_FIFO" || true
+    STDERR_FIFO=
   fi
   if [ -n "${PORT_FILE:-}" ]; then
     rm -f "$PORT_FILE" || true
@@ -509,13 +748,41 @@ set -- "$@" \
   -e "AGENT_TOOLS_BROWSER_PROFILE=${PROFILE_PATH}" \
   "$IMAGE"
 
+log_line "container run: $NAME"
+
+# Container stderr is teed to the client stderr and the log. Stdout stays
+# the MCP stream. A missing tee must not stop the launch.
+if command -v mkfifo >/dev/null 2>&1 && command -v tee >/dev/null 2>&1; then
+  STDERR_FIFO=/tmp/agent-tools-browser-$$.err
+  if ! mkfifo "$STDERR_FIFO" 2>/dev/null; then
+    STDERR_FIFO=
+  fi
+fi
+if [ -n "$STDERR_FIFO" ]; then
+  tee -a "$LOG_FILE" < "$STDERR_FIFO" >&2 &
+  TEE_PID=$!
+fi
+
 # POSIX sh points a background command's stdin at /dev/null. Duplicate the
 # client stdin onto fd 3 and redirect from that fd so MCP stdio still reaches
 # the container, and the trap can run when this wait returns.
 exec 3<&0
-"$ENGINE" "$@" <&3 3<&- &
+if [ -n "$STDERR_FIFO" ]; then
+  "$ENGINE" "$@" <&3 3<&- 2>"$STDERR_FIFO" &
+else
+  "$ENGINE" "$@" <&3 3<&- &
+fi
 RUN_PID=$!
 status=0
 wait "$RUN_PID" || status=$?
 RUN_PID=
+log_line "container exit $status"
+if [ -n "${TEE_PID:-}" ]; then
+  wait "$TEE_PID" 2>/dev/null || true
+  TEE_PID=
+fi
+if [ -n "${STDERR_FIFO:-}" ]; then
+  rm -f "$STDERR_FIFO" 2>/dev/null || true
+  STDERR_FIFO=
+fi
 exit "$status"

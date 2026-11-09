@@ -6,14 +6,21 @@ podman in /usr/bin must not see those binaries.
 
 from __future__ import annotations
 
+import ast
+import json
 import os
 import pty
 import re
+import select
 import shutil
 import signal
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
+
+import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 LAUNCHER = REPO / "runtimes" / "browser" / "bin" / "agent-tools-browser"
@@ -28,6 +35,29 @@ for arg in "$@"; do
 done
 printf '\\n' >> "$STUB_LOG"
 if [ "${1:-}" = "info" ]; then
+  base=$(basename "$0")
+  if [ "$base" = "docker" ] && [ -n "${STUB_DOCKER_INFO_RC+x}" ]; then
+    if [ "${STUB_INFO_PODMAN:-}" = "1" ]; then
+      echo podman
+    fi
+    exit "$STUB_DOCKER_INFO_RC"
+  fi
+  if [ -n "${STUB_INFO_SUCCEED_AFTER:-}" ]; then
+    count_file="${STUB_INFO_COUNT_FILE:-$HOME/stub-info-count}"
+    n=0
+    if [ -f "$count_file" ]; then
+      IFS= read -r n < "$count_file" || n=0
+    fi
+    case $n in
+      ""|*[!0-9]*) n=0 ;;
+    esac
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$count_file"
+    if [ "$n" -ge "$STUB_INFO_SUCCEED_AFTER" ]; then
+      exit 0
+    fi
+    exit 1
+  fi
   if [ -n "${STUB_READY_FILE:-}" ] && [ -f "$STUB_READY_FILE" ]; then
     exit 0
   fi
@@ -51,8 +81,13 @@ if [ "${1:-}" = "machine" ] && [ "${2:-}" = "list" ]; then
   exit 0
 fi
 if [ "${1:-}" = "machine" ] && [ "${2:-}" = "start" ]; then
+  if [ -n "${STUB_START_STDERR:-}" ]; then
+    printf '%s\n' "$STUB_START_STDERR" >&2
+  fi
   if [ -n "${STUB_READY_FILE:-}" ]; then
-    printf '' > "$STUB_READY_FILE"
+    if [ "${STUB_START_RC:-0}" = "0" ] || [ "${STUB_READY_EVEN_IF_START_FAILS:-}" = "1" ]; then
+      printf '' > "$STUB_READY_FILE"
+    fi
   fi
   exit "${STUB_START_RC:-0}"
 fi
@@ -63,15 +98,35 @@ if [ "${1:-}" = "desktop" ] && [ "${2:-}" = "status" ]; then
   exit 0
 fi
 if [ "${1:-}" = "desktop" ] && [ "${2:-}" = "start" ]; then
+  if [ -n "${STUB_START_STDERR:-}" ]; then
+    printf '%s\n' "$STUB_START_STDERR" >&2
+  fi
   if [ -n "${STUB_READY_FILE:-}" ]; then
-    printf '' > "$STUB_READY_FILE"
+    if [ "${STUB_START_RC:-0}" = "0" ] || [ "${STUB_READY_EVEN_IF_START_FAILS:-}" = "1" ]; then
+      printf '' > "$STUB_READY_FILE"
+    fi
   fi
   exit "${STUB_START_RC:-0}"
 fi
-if [ "${1:-}" = "run" ] && [ -n "${STUB_RUN_HOLD:-}" ]; then
-  while [ ! -f "$STUB_RUN_HOLD" ]; do
-    sleep 0.05
-  done
+if [ "${1:-}" = "image" ]; then
+  if [ "${STUB_IMAGE_MISSING:-}" = "1" ]; then
+    printf '%s\n' "No such image" >&2
+    exit 1
+  fi
+  exit 0
+fi
+if [ "${1:-}" = "run" ]; then
+  if [ -n "${STUB_RUN_STDERR:-}" ]; then
+    printf '%s\n' "$STUB_RUN_STDERR" >&2
+  fi
+  if [ -n "${STUB_FAKE_MCP:-}" ]; then
+    exec "$STUB_FAKE_MCP"
+  fi
+  if [ -n "${STUB_RUN_HOLD:-}" ]; then
+    while [ ! -f "$STUB_RUN_HOLD" ]; do
+      sleep 0.05
+    done
+  fi
 fi
 exit 0
 """
@@ -104,7 +159,19 @@ def _bins(
 ) -> Path:
     bindir = tmp_path / "bin"
     bindir.mkdir(parents=True)
-    for tool in ("dirname", "basename", "sleep", "rm"):
+    for tool in (
+        "dirname",
+        "basename",
+        "sleep",
+        "rm",
+        "mkdir",
+        "date",
+        "tail",
+        "tee",
+        "mkfifo",
+        "wc",
+        "mv",
+    ):
         source = shutil.which(tool)
         if source is None:
             raise RuntimeError(f"{tool} is required to run the launcher")
@@ -161,6 +228,7 @@ def _run(
         [str(LAUNCHER), *(args or [])],
         env=env,
         cwd=REPO,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         check=False,
@@ -210,11 +278,16 @@ def test_launcher_is_posix_sh() -> None:
     assert LAUNCHER.stat().st_mode & 0o111
     result = subprocess.run(["sh", "-n", str(LAUNCHER)], check=False, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+    dash = shutil.which("dash")
+    if dash:
+        dashed = subprocess.run([dash, "-n", str(LAUNCHER)], check=False, capture_output=True, text=True)
+        assert dashed.returncode == 0, dashed.stderr
 
 
 def test_docker_on_linux_is_the_default(tmp_path: Path) -> None:
     result, text = _run(tmp_path)
     assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
     runs = _run_lines(text)
     assert len(runs) == 1
     line = runs[0]
@@ -234,7 +307,7 @@ def test_docker_on_linux_is_the_default(tmp_path: Path) -> None:
 
 
 def test_podman_when_docker_info_fails(tmp_path: Path) -> None:
-    result, text = _run(tmp_path, extra={"STUB_INFO_RC": "1"})
+    result, text = _run(tmp_path, extra={"STUB_DOCKER_INFO_RC": "1"})
     assert result.returncode == 0, result.stderr
     line = _run_lines(text)[0]
     assert line.startswith("podman <run> <-i> <--rm>")
@@ -263,7 +336,7 @@ def test_explicit_engine_skips_docker_probe(tmp_path: Path) -> None:
 def test_explicit_docker(tmp_path: Path) -> None:
     result, text = _run(
         tmp_path,
-        extra={"AGENT_TOOLS_CONTAINER_ENGINE": "docker", "STUB_INFO_RC": "1"},
+        extra={"AGENT_TOOLS_CONTAINER_ENGINE": "docker"},
     )
     assert result.returncode == 0, result.stderr
     line = _run_lines(text)[0]
@@ -394,7 +467,7 @@ def _stopped_machine(tmp_path: Path, **extra: str) -> dict[str, str]:
         "AGENT_TOOLS_CONTAINER_ENGINE": "podman",
         "STUB_INFO_RC": "1",
         "STUB_READY_FILE": str(tmp_path / "ready"),
-        "STUB_MACHINE_LIST": "podman-machine-default false true",
+        "STUB_MACHINE_LIST": "podman-machine-default* false false true",
     }
     env.update(extra)
     return env
@@ -431,7 +504,10 @@ def test_podman_machine_never_does_not_start(tmp_path: Path) -> None:
 
 
 def test_podman_machine_ask_without_tty_does_not_start(tmp_path: Path) -> None:
-    result, text = _run(tmp_path, extra=_stopped_machine(tmp_path))
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(tmp_path, AGENT_TOOLS_AUTO_START_ENGINE="ask"),
+    )
     assert result.returncode == 1
     assert "No way to ask for permission" in result.stderr
     assert "AGENT_TOOLS_AUTO_START_ENGINE=always" in result.stderr
@@ -456,7 +532,7 @@ def test_stopped_default_machine_is_the_one_started(tmp_path: Path) -> None:
         extra=_stopped_machine(
             tmp_path,
             AGENT_TOOLS_AUTO_START_ENGINE="always",
-            STUB_MACHINE_LIST="other false false\npodman-machine-default false true",
+            STUB_MACHINE_LIST="other false false false\npodman-machine-default* false false true",
         ),
     )
     assert result.returncode == 0, result.stderr
@@ -470,7 +546,9 @@ def test_running_machine_is_not_started(tmp_path: Path) -> None:
         extra=_stopped_machine(
             tmp_path,
             AGENT_TOOLS_AUTO_START_ENGINE="always",
-            STUB_MACHINE_LIST="podman-machine-default true true\nother false",
+            STUB_MACHINE_LIST="podman-machine-default* true false true\nother false false false",
+            STUB_INFO_SUCCEED_AFTER="2",
+            AGENT_TOOLS_ENGINE_START_TIMEOUT="5",
         ),
     )
     assert result.returncode == 0, result.stderr
@@ -482,7 +560,7 @@ def test_running_machine_is_not_started(tmp_path: Path) -> None:
 def test_darwin_dialog_start(tmp_path: Path) -> None:
     result, text = _run(
         tmp_path,
-        extra=_stopped_machine(tmp_path, STUB_UNAME="Darwin"),
+        extra=_stopped_machine(tmp_path, STUB_UNAME="Darwin", AGENT_TOOLS_AUTO_START_ENGINE="ask"),
     )
     assert result.returncode == 0, result.stderr
     dialog = next(line for line in text.splitlines() if line.startswith("osascript "))
@@ -496,7 +574,12 @@ def test_darwin_dialog_start(tmp_path: Path) -> None:
 def test_darwin_dialog_cancel(tmp_path: Path) -> None:
     result, text = _run(
         tmp_path,
-        extra=_stopped_machine(tmp_path, STUB_UNAME="Darwin", STUB_DIALOG="cancel"),
+        extra=_stopped_machine(
+            tmp_path,
+            STUB_UNAME="Darwin",
+            STUB_DIALOG="cancel",
+            AGENT_TOOLS_AUTO_START_ENGINE="ask",
+        ),
     )
     assert result.returncode == 1
     assert "Start was cancelled" in result.stderr
@@ -507,7 +590,7 @@ def test_darwin_without_osascript_does_not_start(tmp_path: Path) -> None:
     result, text = _run(
         tmp_path,
         osascript=False,
-        extra=_stopped_machine(tmp_path, STUB_UNAME="Darwin"),
+        extra=_stopped_machine(tmp_path, STUB_UNAME="Darwin", AGENT_TOOLS_AUTO_START_ENGINE="ask"),
     )
     assert result.returncode == 1
     assert "No way to ask for permission" in result.stderr
@@ -520,11 +603,15 @@ def test_podman_machine_start_failure(tmp_path: Path) -> None:
         extra=_stopped_machine(
             tmp_path,
             AGENT_TOOLS_AUTO_START_ENGINE="always",
+            AGENT_TOOLS_ENGINE_START_TIMEOUT="1",
             STUB_START_RC="1",
         ),
     )
     assert result.returncode == 1
     assert "Podman machine failed to start" in result.stderr
+    assert "Timed out after 1s waiting for podman" in result.stderr
+    assert "podman <machine> <start> <podman-machine-default>" in text
+    assert "<podman-machine-default*>" not in text
     assert _run_lines(text) == []
 
 
@@ -592,17 +679,23 @@ def _run_tty(tmp_path: Path, answer: bytes, extra: dict[str, str]) -> tuple[int,
     deadline = time.time() + 5
     try:
         while time.time() < deadline:
-            try:
-                chunk = os.read(fd, 4096)
-            except BlockingIOError:
+            if fd < 0:
                 chunk = b""
-            except OSError:
-                chunk = b""
+            else:
+                try:
+                    chunk = os.read(fd, 4096)
+                except BlockingIOError:
+                    chunk = b""
+                except OSError:
+                    chunk = b""
             if chunk:
                 buf += chunk
                 if not sent and b"[y/N]" in buf:
                     os.write(fd, answer)
                     sent = True
+                if sent and fd >= 0 and b"Start was cancelled" in buf:
+                    os.close(fd)
+                    fd = -1
             wait_pid, wait_status = os.waitpid(pid, os.WNOHANG)
             if wait_pid == pid:
                 status = wait_status
@@ -614,7 +707,8 @@ def _run_tty(tmp_path: Path, answer: bytes, extra: dict[str, str]) -> tuple[int,
             os.waitpid(pid, 0)
             raise AssertionError(f"launcher did not exit, tty={buf!r}")
     finally:
-        os.close(fd)
+        if fd >= 0:
+            os.close(fd)
     if os.WIFEXITED(status):
         code = os.WEXITSTATUS(status)
     else:
@@ -624,14 +718,22 @@ def _run_tty(tmp_path: Path, answer: bytes, extra: dict[str, str]) -> tuple[int,
 
 
 def test_linux_tty_yes_starts_podman(tmp_path: Path) -> None:
-    code, _tty, text = _run_tty(tmp_path, b"y\n", _stopped_machine(tmp_path))
+    code, _tty, text = _run_tty(
+        tmp_path,
+        b"y\n",
+        _stopped_machine(tmp_path, AGENT_TOOLS_AUTO_START_ENGINE="ask"),
+    )
     assert code == 0, text
     assert "podman <machine> <start> <podman-machine-default>" in text
     assert _run_lines(text)[0].startswith("podman <run>")
 
 
 def test_linux_tty_no_does_not_start(tmp_path: Path) -> None:
-    code, tty, text = _run_tty(tmp_path, b"n\n", _stopped_machine(tmp_path))
+    code, tty, text = _run_tty(
+        tmp_path,
+        b"n\n",
+        _stopped_machine(tmp_path, AGENT_TOOLS_AUTO_START_ENGINE="ask"),
+    )
     assert code == 1
     assert "Start was cancelled" in tty
     _assert_not_started(text)
@@ -778,3 +880,435 @@ def test_concurrent_launches_get_distinct_ports(tmp_path: Path) -> None:
     finally:
         hold.write_text("go\n", encoding="utf-8")
         _stop_procs(procs)
+
+
+DEGRADED = REPO / "runtimes" / "browser" / "bin" / "agent-tools-browser-degraded"
+TOOLS_SNAPSHOT = REPO / "runtimes" / "browser" / "tools.json"
+CATALOG_TOOL_ORDER = (
+    "navigate",
+    "read",
+    "screenshot",
+    "handoff",
+    "click",
+    "type",
+    "scroll",
+    "select",
+    "wait_for",
+)
+
+FAKE_MCP = """#!/usr/bin/env python3
+import json
+import sys
+
+def reply(msg_id, result):
+    sys.stdout.buffer.write(
+        (json.dumps({"jsonrpc": "2.0", "id": msg_id, "result": result}) + "\\n").encode()
+    )
+    sys.stdout.buffer.flush()
+
+while True:
+    line = sys.stdin.buffer.readline()
+    if not line:
+        break
+    try:
+        msg = json.loads(line.decode())
+    except Exception:
+        continue
+    if not isinstance(msg, dict) or msg.get("id") is None:
+        continue
+    if msg.get("method") == "tools/call":
+        reply(msg["id"], {"content": [{"type": "text", "text": "proxied-ok"}], "isError": False})
+    else:
+        reply(msg["id"], {})
+"""
+
+
+def _catalog_tools() -> list[dict]:
+    tools = []
+    folder = REPO / "catalog" / "browser"
+    for name in CATALOG_TOOL_ORDER:
+        data = yaml.safe_load((folder / f"{name}.yaml").read_text(encoding="utf-8"))
+        tools.append(
+            {
+                "name": name,
+                "description": data["when_to_use"],
+                "inputSchema": data["inputs"],
+            }
+        )
+    return tools
+
+
+def test_tools_snapshot_matches_catalog() -> None:
+    snapshot = json.loads(TOOLS_SNAPSHOT.read_text(encoding="utf-8"))
+    assert snapshot == _catalog_tools()
+
+
+def test_degraded_server_py39_syntax() -> None:
+    compiled = subprocess.run(
+        [sys.executable, "-m", "py_compile", str(DEGRADED)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert compiled.returncode == 0, compiled.stderr
+    source = DEGRADED.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        assert type(node).__name__ != "Match"
+        annotation = getattr(node, "annotation", None)
+        if isinstance(annotation, ast.BinOp):
+            assert not isinstance(annotation.op, ast.BitOr)
+        returns = getattr(node, "returns", None)
+        if isinstance(returns, ast.BinOp):
+            assert not isinstance(returns.op, ast.BitOr)
+    assert "\nwith (" not in source
+
+
+def test_stopped_machine_autostarts_and_strips_star(tmp_path: Path) -> None:
+    result, text = _run(tmp_path, extra=_stopped_machine(tmp_path))
+    assert result.returncode == 0, result.stderr
+    assert "podman <machine> <start> <podman-machine-default>" in text
+    assert "<podman-machine-default*>" not in text
+    assert "osascript" not in text
+    assert _run_lines(text)[0].startswith("podman <run>")
+
+
+def test_starting_machine_waits_without_calling_start(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(
+            tmp_path,
+            STUB_MACHINE_LIST="podman-machine-default* false true true",
+            STUB_INFO_SUCCEED_AFTER="2",
+            AGENT_TOOLS_ENGINE_START_TIMEOUT="5",
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "<machine> <start>" not in text
+    assert _run_lines(text)[0].startswith("podman <run>")
+
+
+def test_machine_start_error_still_waits_for_info(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        extra=_stopped_machine(
+            tmp_path,
+            STUB_START_RC="1",
+            STUB_READY_EVEN_IF_START_FAILS="1",
+            STUB_START_STDERR="Error: podman-machine-default*: VM does not exist",
+        ),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "podman <machine> <start> <podman-machine-default>" in text
+    assert "<podman-machine-default*>" not in text
+    assert "Podman machine failed to start" in result.stderr
+    assert _run_lines(text)[0].startswith("podman <run>")
+    body = (tmp_path / ".local" / "state" / "agent-tools" / "browser.log").read_text(encoding="utf-8")
+    assert "VM does not exist" in body
+
+
+def test_never_without_python3_exits(tmp_path: Path) -> None:
+    result, text = _run(
+        tmp_path,
+        python3=False,
+        extra=_stopped_machine(tmp_path, AGENT_TOOLS_AUTO_START_ENGINE="never"),
+    )
+    assert result.returncode == 1
+    assert "AGENT_TOOLS_AUTO_START_ENGINE=never" in result.stderr
+    _assert_not_started(text)
+    body = (tmp_path / ".local" / "state" / "agent-tools" / "browser.log").read_text(encoding="utf-8")
+    assert "python3 missing" in body
+
+
+def test_log_records_decisions_and_override(tmp_path: Path) -> None:
+    log = tmp_path / "custom.log"
+    result, _text = _run(
+        tmp_path,
+        extra={
+            "AGENT_TOOLS_LOG_FILE": str(log),
+            "STUB_RUN_STDERR": "container-stderr-marker",
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    body = log.read_text(encoding="utf-8")
+    assert "engine chosen:" in body
+    assert "state ready:" in body
+    assert "container exit" in body
+    assert "container-stderr-marker" in body
+    assert re.search(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z \d+ ", body)
+
+
+def test_default_and_darwin_log_paths(tmp_path: Path) -> None:
+    result, _text = _run(tmp_path / "linux")
+    assert result.returncode == 0, result.stderr
+    linux = tmp_path / "linux" / ".local" / "state" / "agent-tools" / "browser.log"
+    assert "state ready:" in linux.read_text(encoding="utf-8")
+    result, _text = _run(tmp_path / "mac", extra={"STUB_UNAME": "Darwin"})
+    assert result.returncode == 0, result.stderr
+    mac = tmp_path / "mac" / "Library" / "Logs" / "agent-tools-browser.log"
+    assert "state ready:" in mac.read_text(encoding="utf-8")
+
+
+def test_xdg_state_home_log_path(tmp_path: Path) -> None:
+    xdg = tmp_path / "xdg"
+    result, _text = _run(tmp_path / "run", extra={"XDG_STATE_HOME": str(xdg)})
+    assert result.returncode == 0, result.stderr
+    assert "state ready:" in (xdg / "agent-tools" / "browser.log").read_text(encoding="utf-8")
+
+
+def test_log_keeps_last_megabyte_when_over_cap(tmp_path: Path) -> None:
+    log = tmp_path / "big.log"
+    log.write_bytes(b"A" * (5 * 1024 * 1024 + 80))
+    result, _text = _run(tmp_path / "run", extra={"AGENT_TOOLS_LOG_FILE": str(log)})
+    assert result.returncode == 0, result.stderr
+    data = log.read_bytes()
+    assert len(data) < 2 * 1024 * 1024
+    assert b"state ready:" in data
+
+
+def _start_mcp(tmp_path: Path, extra: dict[str, str]) -> subprocess.Popen[bytes]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    bindir = _bins(tmp_path, docker=True, podman=True)
+    env = {
+        "PATH": str(bindir),
+        "STUB_LOG": str(tmp_path / "log"),
+        "HOME": str(tmp_path),
+        **extra,
+    }
+    proc = subprocess.Popen(
+        [str(LAUNCHER)],
+        env=env,
+        cwd=REPO,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+
+    def _drain() -> None:
+        assert proc.stderr is not None
+        proc.stderr.read()
+
+    threading.Thread(target=_drain, daemon=True).start()
+    return proc
+
+
+def _write_mcp(proc: subprocess.Popen[bytes], payload: bytes) -> None:
+    assert proc.stdin is not None
+    proc.stdin.write(payload)
+    flusher = getattr(proc.stdin, "flush", None)
+    if flusher is not None:
+        flusher()
+
+
+def _read_mcp(proc: subprocess.Popen[bytes], timeout: float) -> dict:
+    assert proc.stdout is not None
+    deadline = time.time() + timeout
+    buf = b""
+    while time.time() < deadline:
+        ready, _, _ = select.select([proc.stdout], [], [], 0.2)
+        if not ready:
+            if proc.poll() is not None:
+                break
+            continue
+        piece = proc.stdout.read(1)
+        if not piece:
+            break
+        buf += piece
+        if piece == b"\n":
+            return json.loads(buf.decode())
+    raise AssertionError(f"no MCP response in {buf!r} rc={proc.poll()}")
+
+
+def _stop_mcp(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is None:
+        if proc.stdin is not None:
+            proc.stdin.close()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+def test_engine_never_up_answers_mcp_until_stdin_closes(tmp_path: Path) -> None:
+    log = tmp_path / "browser.log"
+    proc = _start_mcp(
+        tmp_path,
+        _stopped_machine(
+            tmp_path,
+            AGENT_TOOLS_ENGINE_START_TIMEOUT="1",
+            AGENT_TOOLS_LOG_FILE=str(log),
+            STUB_START_RC="1",
+        ),
+    )
+    try:
+        _write_mcp(
+            proc,
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "0"},
+                    },
+                }
+            ).encode()
+            + b"\n",
+        )
+        init = _read_mcp(proc, 8)
+        assert init["id"] == 1
+        assert init["result"]["protocolVersion"] == "2024-11-05"
+        assert init["result"]["capabilities"] == {"tools": {}}
+        assert init["result"]["serverInfo"]["name"] == "agent-tools-browser"
+        assert "not up yet" in init["result"]["instructions"]
+        _write_mcp(
+            proc,
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}).encode() + b"\n",
+        )
+        _write_mcp(proc, json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).encode() + b"\n")
+        listed = _read_mcp(proc, 8)
+        names = [tool["name"] for tool in listed["result"]["tools"]]
+        assert names == [tool["name"] for tool in _catalog_tools()]
+        assert listed["result"]["tools"] == _catalog_tools()
+        _write_mcp(
+            proc,
+            json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "navigate", "arguments": {}}}).encode()
+            + b"\n",
+        )
+        called = _read_mcp(proc, 8)
+        assert called["result"]["isError"] is True
+        text = called["result"]["content"][0]["text"]
+        assert "agent-tools-browser is not running:" in text
+        assert "Timed out after 1s waiting for podman" in text
+        assert str(log) in text
+        assert proc.poll() is None
+        _write_mcp(proc, json.dumps({"jsonrpc": "2.0", "id": 4, "method": "ping"}).encode() + b"\n")
+        ping = _read_mcp(proc, 8)
+        assert ping["result"] == {}
+        _write_mcp(proc, json.dumps({"jsonrpc": "2.0", "id": 5, "method": "nope"}).encode() + b"\n")
+        missing = _read_mcp(proc, 8)
+        assert missing["error"]["code"] == -32601
+        assert proc.poll() is None
+        assert proc.stdin is not None
+        proc.stdin.close()
+        code = proc.wait(timeout=5)
+        assert code == 1
+        stub = (tmp_path / "log").read_text(encoding="utf-8")
+        assert "podman <machine> <start> <podman-machine-default>" in stub
+        assert "<podman-machine-default*>" not in stub
+    finally:
+        _stop_mcp(proc)
+
+
+def test_engine_recovers_and_proxies_the_same_session(tmp_path: Path) -> None:
+    fake = tmp_path / "fake-mcp"
+    fake.write_text(FAKE_MCP, encoding="utf-8")
+    fake.chmod(0o755)
+    ready = tmp_path / "ready"
+    log = tmp_path / "browser.log"
+    proc = _start_mcp(
+        tmp_path,
+        _stopped_machine(
+            tmp_path,
+            AGENT_TOOLS_ENGINE_START_TIMEOUT="1",
+            AGENT_TOOLS_LOG_FILE=str(log),
+            STUB_START_RC="1",
+            STUB_READY_FILE=str(ready),
+            STUB_FAKE_MCP=str(fake),
+        ),
+    )
+    try:
+        _write_mcp(
+            proc,
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"protocolVersion": "2025-06-18", "capabilities": {}},
+                }
+            ).encode()
+            + b"\n",
+        )
+        init = _read_mcp(proc, 8)
+        assert init["result"]["serverInfo"]["name"] == "agent-tools-browser"
+        _write_mcp(proc, json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).encode() + b"\n")
+        listed = _read_mcp(proc, 8)
+        assert [tool["name"] for tool in listed["result"]["tools"]] == list(CATALOG_TOOL_ORDER)
+        ready.write_text("", encoding="utf-8")
+        _write_mcp(
+            proc,
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "navigate", "arguments": {"url": "https://example.test/"}},
+                }
+            ).encode()
+            + b"\n",
+        )
+        called = _read_mcp(proc, 20)
+        assert called["result"]["isError"] is False
+        assert called["result"]["content"][0]["text"] == "proxied-ok"
+        assert proc.poll() is None
+        _write_mcp(proc, json.dumps({"jsonrpc": "2.0", "id": 4, "method": "ping"}).encode() + b"\n")
+        ping = _read_mcp(proc, 8)
+        assert ping["result"] == {}
+        assert proc.poll() is None
+        assert proc.stdin is not None
+        proc.stdin.close()
+        code = proc.wait(timeout=8)
+        assert code == 0
+    finally:
+        _stop_mcp(proc)
+
+
+def test_image_missing_degraded_names_build(tmp_path: Path) -> None:
+    log = tmp_path / "browser.log"
+    proc = _start_mcp(
+        tmp_path,
+        {
+            "AGENT_TOOLS_CONTAINER_ENGINE": "podman",
+            "STUB_IMAGE_MISSING": "1",
+            "AGENT_TOOLS_LOG_FILE": str(log),
+        },
+    )
+    try:
+        _write_mcp(
+            proc,
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {"capabilities": {}, "clientInfo": {"name": "test", "version": "0"}},
+                }
+            ).encode()
+            + b"\n",
+        )
+        init = _read_mcp(proc, 8)
+        assert init["result"]["protocolVersion"] == "2025-06-18"
+        assert "not up yet" in init["result"]["instructions"]
+        _write_mcp(
+            proc,
+            json.dumps(
+                {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "navigate", "arguments": {}}}
+            ).encode()
+            + b"\n",
+        )
+        called = _read_mcp(proc, 8)
+        text = called["result"]["content"][0]["text"]
+        assert called["result"]["isError"] is True
+        assert "agent-tools-browser --build" in text
+        assert str(log) in text
+        assert proc.poll() is None
+        assert proc.stdin is not None
+        proc.stdin.close()
+        assert proc.wait(timeout=5) == 1
+    finally:
+        _stop_mcp(proc)

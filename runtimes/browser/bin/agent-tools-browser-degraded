@@ -1,0 +1,370 @@
+#!/usr/bin/env python3
+"""Degraded MCP server used when the browser runtime is not up.
+
+Newline-delimited JSON-RPC on stdio. Python 3.9 stdlib only: no match
+statements, no union annotations, no parenthesized context managers.
+"""
+
+import datetime
+import fcntl
+import json
+import os
+import select
+import subprocess
+import sys
+import threading
+import time
+
+PROTOCOL_FALLBACK = "2025-06-18"
+HANDSHAKE_TIMEOUT = 60
+
+
+def script_dir():
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def launcher_path():
+    return os.path.join(script_dir(), "agent-tools-browser")
+
+
+def tools_path():
+    return os.path.join(os.path.dirname(script_dir()), "tools.json")
+
+
+def log_line(message):
+    path = os.environ.get("AGENT_TOOLS_LOG_FILE", "")
+    if not path:
+        return
+    try:
+        stamp = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        handle = open(path, "a", encoding="utf-8")
+        try:
+            handle.write("%s %s %s\n" % (stamp, os.getpid(), message))
+        finally:
+            handle.close()
+    except Exception:
+        return
+
+
+def emit(payload):
+    sys.stdout.buffer.write(json.dumps(payload).encode("utf-8") + b"\n")
+    sys.stdout.buffer.flush()
+
+
+def reply_result(msg_id, result):
+    emit({"jsonrpc": "2.0", "id": msg_id, "result": result})
+
+
+def reply_error(msg_id, code, message):
+    emit({
+        "jsonrpc": "2.0",
+        "id": msg_id,
+        "error": {"code": code, "message": message},
+    })
+
+
+def load_tools():
+    handle = open(tools_path(), "r", encoding="utf-8")
+    try:
+        data = json.load(handle)
+    finally:
+        handle.close()
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+def lock_file():
+    path = "/tmp/agent-tools-browser-ensure-%s.lock" % os.getuid()
+    handle = open(path, "a")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def unlock_file(handle):
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        handle.close()
+    except Exception:
+        pass
+
+
+def parse_probe(text):
+    reason = ""
+    fix = ""
+    for line in text.splitlines():
+        if line.startswith("REASON:"):
+            reason = line[7:]
+        elif line.startswith("FIX:"):
+            fix = line[4:]
+    return reason, fix
+
+
+def ensure_engine():
+    handle = lock_file()
+    try:
+        log_line("probe ensure-engine")
+        proc = subprocess.run(
+            [launcher_path(), "--ensure-engine"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        err = proc.stderr.decode("utf-8", "replace").strip()
+        if err:
+            log_line("ensure-engine stderr: %s" % err.splitlines()[-1][:500])
+        if proc.returncode == 0:
+            log_line("ensure-engine ready")
+            return True, "", ""
+        reason, fix = parse_probe(proc.stdout.decode("utf-8", "replace"))
+        if not reason:
+            reason = "engine did not become ready"
+        if not fix:
+            fix = "Set AGENT_TOOLS_AUTO_START_ENGINE=always"
+        log_line("ensure-engine failed: %s" % reason)
+        return False, reason, fix
+    finally:
+        unlock_file(handle)
+
+
+def strip_dot(text):
+    while text.endswith("."):
+        text = text[:-1]
+    return text
+
+
+def not_running_text(reason, fix):
+    log_path = os.environ.get("AGENT_TOOLS_LOG_FILE", "")
+    return "agent-tools-browser is not running: %s. %s. Log: %s." % (
+        strip_dot(reason),
+        strip_dot(fix),
+        log_path,
+    )
+
+
+def error_result(reason, fix):
+    return {
+        "content": [{"type": "text", "text": not_running_text(reason, fix)}],
+        "isError": True,
+    }
+
+
+def write_child(child, payload):
+    if not payload.endswith(b"\n"):
+        payload = payload + b"\n"
+    child.stdin.write(payload)
+    flusher = getattr(child.stdin, "flush", None)
+    if flusher is not None:
+        flusher()
+
+
+def read_pipe_line(stream, timeout):
+    deadline = time.time() + timeout
+    chunks = b""
+    while time.time() < deadline:
+        wait = deadline - time.time()
+        if wait <= 0:
+            break
+        ready, _, _ = select.select([stream], [], [], wait)
+        if not ready:
+            continue
+        piece = stream.read(1)
+        if not piece:
+            return chunks
+        chunks = chunks + piece
+        if piece == b"\n":
+            return chunks
+    return chunks
+
+
+def raw_readline(stream):
+    chunks = b""
+    while True:
+        piece = stream.read(1)
+        if not piece:
+            return chunks
+        chunks = chunks + piece
+        if piece == b"\n":
+            return chunks
+
+
+def start_child():
+    env = os.environ.copy()
+    env["AGENT_TOOLS_NO_DEGRADED"] = "1"
+    log_line("starting container launcher")
+    try:
+        return subprocess.Popen(
+            [launcher_path()],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            env=env,
+            bufsize=0,
+        )
+    except Exception as exc:
+        log_line("container launcher failed: %s" % exc)
+        return None
+
+
+def proxy(child):
+    def pump_stdin():
+        try:
+            while True:
+                line = sys.stdin.buffer.readline()
+                if not line:
+                    break
+                child.stdin.write(line)
+                flusher = getattr(child.stdin, "flush", None)
+                if flusher is not None:
+                    flusher()
+        except Exception:
+            pass
+        try:
+            child.stdin.close()
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=pump_stdin)
+    thread.daemon = True
+    thread.start()
+    try:
+        while True:
+            line = raw_readline(child.stdout)
+            if not line:
+                break
+            sys.stdout.buffer.write(line)
+            sys.stdout.buffer.flush()
+    except Exception as exc:
+        log_line("proxy stdout failed: %s" % exc)
+    code = child.wait()
+    log_line("proxied container exit %s" % code)
+    if code is None:
+        code = 1
+    raise SystemExit(code)
+
+
+def forward_and_proxy(child, initialize_line, call_line):
+    if not initialize_line:
+        initialize_line = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_FALLBACK,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "agent-tools-browser-degraded",
+                    "version": "1.0.0",
+                },
+            },
+        }).encode("utf-8") + b"\n"
+    write_child(child, initialize_line)
+    response = read_pipe_line(child.stdout, HANDSHAKE_TIMEOUT)
+    if not response:
+        log_line("container produced no initialize response")
+        return False
+    log_line("swallowed container initialize response")
+    note = json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+    write_child(child, note.encode("utf-8") + b"\n")
+    write_child(child, call_line)
+    proxy(child)
+    return True
+
+
+def main():
+    reason = os.environ.get("AGENT_TOOLS_DEGRADED_REASON", "the runtime is not up")
+    fix = os.environ.get(
+        "AGENT_TOOLS_DEGRADED_FIX",
+        "Set AGENT_TOOLS_AUTO_START_ENGINE=always",
+    )
+    try:
+        tools = load_tools()
+    except Exception as exc:
+        log_line("tools snapshot unreadable: %s" % exc)
+        tools = []
+    log_line("degraded server listening")
+    initialize_line = None
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            log_line("degraded stdin closed")
+            return 1
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            msg = json.loads(stripped.decode("utf-8"))
+        except Exception:
+            emit({
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": "Parse error"},
+            })
+            continue
+        if not isinstance(msg, dict):
+            continue
+        method = msg.get("method", "")
+        has_id = "id" in msg and msg.get("id") is not None
+        if not has_id:
+            continue
+        msg_id = msg.get("id")
+        if method == "initialize":
+            initialize_line = line
+            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+            version = params.get("protocolVersion") or PROTOCOL_FALLBACK
+            instructions = "The browser runtime is not up yet. %s %s" % (reason, fix)
+            reply_result(msg_id, {
+                "protocolVersion": version,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "agent-tools-browser", "version": "1.0.0"},
+                "instructions": instructions,
+            })
+            continue
+        if method == "ping":
+            reply_result(msg_id, {})
+            continue
+        if method == "tools/list":
+            reply_result(msg_id, {"tools": tools})
+            continue
+        if method == "tools/call":
+            ok, new_reason, new_fix = ensure_engine()
+            if new_reason:
+                reason = new_reason
+            if new_fix:
+                fix = new_fix
+            if not ok:
+                reply_result(msg_id, error_result(reason, fix))
+                continue
+            child = start_child()
+            if child is None or child.stdin is None or child.stdout is None:
+                reply_result(
+                    msg_id,
+                    error_result("the container launcher did not start", fix),
+                )
+                continue
+            forwarded = forward_and_proxy(child, initialize_line, line)
+            if not forwarded:
+                try:
+                    child.kill()
+                except Exception:
+                    pass
+                reply_result(
+                    msg_id,
+                    error_result("the container exited before the MCP handshake", fix),
+                )
+                continue
+            return 0
+        reply_error(msg_id, -32601, "Method not found")
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log_line("degraded server crashed: %s" % exc)
+        sys.exit(1)

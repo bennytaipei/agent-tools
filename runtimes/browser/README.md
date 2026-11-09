@@ -67,20 +67,30 @@ A `docker` binary whose `--version` or `info` text contains `podman` is Podman's
 
 ### Stopped engine
 
-If the chosen engine's VM or daemon is not running, the launcher asks before starting it.
+If the chosen engine's VM or daemon is not running, the launcher starts it.
 
-- Podman: `podman machine list` shows a machine and none of them are running. The launcher starts the default stopped machine, or the first stopped machine when none is the default. It does not create a machine.
+- Podman: `podman machine list` shows a machine and none of them are running or starting. The launcher starts the default stopped machine, or the first stopped machine when none is the default. It does not create a machine. Podman 5 prints a trailing `*` on the default machine's name. The launcher strips that character before `podman machine start`. A machine whose `Starting` field is true is left alone. The launcher waits for `podman info` instead of calling start again.
 - Docker Desktop: `docker desktop status` reports that Desktop is stopped. The launcher runs `docker desktop start`. A `docker info` failure with no Desktop status is not treated as Docker Desktop. The launcher then keeps the Podman fallback above.
 
-`AGENT_TOOLS_AUTO_START_ENGINE` chooses what happens in that case:
+`AGENT_TOOLS_AUTO_START_ENGINE` chooses what happens when a stopped machine or Desktop can be started:
 
-- `ask` (the default). On macOS the launcher shows an osascript dialog with Start and Cancel. Elsewhere it prompts on `/dev/tty` when that terminal can be opened. The prompt is not read from the MCP stdin.
-- `always`. Start without asking.
-- `never`. Do not start. Exit with an error.
+- `always` (the default). Start without asking.
+- `ask`. On macOS the launcher shows an osascript dialog with Start and Cancel. Elsewhere it prompts on `/dev/tty` when that terminal can be opened. The prompt is not read from the MCP stdin.
+- `never`. Do not start. The MCP connection stays up in degraded mode, and tool calls explain how to start the engine.
 
-Cancel, a declined prompt, a missing `osascript`, or no openable `/dev/tty` exits with an error and does not start the engine.
+Cancel, a declined prompt, a missing `osascript`, or no openable `/dev/tty` does not start the engine. The degraded connection says the start was cancelled, or that there was no way to ask.
 
-After a start, the launcher waits until `docker info` or `podman info` succeeds. The wait stops after `AGENT_TOOLS_ENGINE_START_TIMEOUT` seconds (default 120) and exits with an error.
+After a start, and when the machine is already running or starting but `info` still fails, the launcher waits until `docker info` or `podman info` succeeds. The wait stops after `AGENT_TOOLS_ENGINE_START_TIMEOUT` seconds (default 120). If `machine start` or `desktop start` exits non-zero, its stderr is logged and the launcher still waits for `info` before it gives up. That covers a second launcher that already started the machine.
+
+Ready means `info` succeeded and the image exists (`podman image exists`, or `docker image inspect`). Only a ready engine runs the container. A missing image stays on the degraded connection and names `agent-tools-browser --build`.
+
+### Degraded mode
+
+When the engine or the image is not usable, and `python3` is on `PATH`, the launcher keeps stdout open and speaks MCP itself. `initialize` and `tools/list` succeed. `tools/call` tries to bring the engine up again. If it is still not ready, the call returns an error with the reason, a concrete fix, and the log path. If the engine becomes ready, that same call starts the container and the rest of the session is proxied to it. Without `python3`, the launcher logs the reason and exits.
+
+### Log
+
+Every launcher decision is appended, with an ISO timestamp and a pid, to a log file. On macOS that file is `~/Library/Logs/agent-tools-browser.log`. Elsewhere it is `${XDG_STATE_HOME:-$HOME/.local/state}/agent-tools/browser.log`. `AGENT_TOOLS_LOG_FILE` overrides the path. When the browser tools fail, `tail ~/Library/Logs/agent-tools-browser.log`.
 
 Podman mounts the profile volume with `:U` and uses the host alias `host.containers.internal`. Docker omits `:U`, uses `host.docker.internal`, and on Linux adds `--add-host=host.docker.internal:host-gateway`.
 
@@ -110,8 +120,9 @@ The launcher reads these names. Defaults are in parentheses. None of them is a s
 - `AGENT_TOOLS_BIND_ADDRESS` (`0.0.0.0`)
 - `AGENT_TOOLS_PUBLIC_HOST` (`127.0.0.1`)
 - `AGENT_TOOLS_BROWSER_CHANNEL` (`chromium`)
-- `AGENT_TOOLS_AUTO_START_ENGINE` (`ask`: `always`, `ask`, or `never`)
+- `AGENT_TOOLS_AUTO_START_ENGINE` (`always`: `always`, `ask`, or `never`)
 - `AGENT_TOOLS_ENGINE_START_TIMEOUT` (`120`, seconds)
+- `AGENT_TOOLS_LOG_FILE` (unset: the path in the Log section)
 
 `AGENT_TOOLS_PUBLIC_HOST` stays `127.0.0.1` so the page and the noVNC frame load in the browser on the machine in front of the container. The launcher publishes the handoff page and noVNC on `127.0.0.1` and passes those host ports into the container as `AGENT_TOOLS_PUBLIC_HANDOFF_PORT` and `AGENT_TOOLS_PUBLIC_NOVNC_PORT`. The posted URL and the noVNC frame use those published ports. The process inside the container still binds `8765` and `8766`.
 
