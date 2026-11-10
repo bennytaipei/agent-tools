@@ -1,6 +1,6 @@
 name: browser.navigate
 version: 1.0.0
-when_to_use: Go to a URL in the remote browser.
+when_to_use: 'Open a URL in the remote browser. url is an absolute http or https URL. Example: {"url":"https://example.com"}.'
 inputs:
   type: object
   additionalProperties: false

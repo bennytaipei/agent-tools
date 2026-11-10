@@ -7,6 +7,7 @@ Every path stops x11vnc and websockify.
 
 from __future__ import annotations
 
+import errno
 import html
 import json
 import logging
@@ -25,7 +26,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from agent_tools_browser.processes import (
+    ProcessError,
     Tracked,
+    describe_port_holder,
     port_is_open,
     spawn,
     stop_tracked,
@@ -34,6 +37,11 @@ from agent_tools_browser.processes import (
 )
 
 log = logging.getLogger("agent_tools_browser")
+
+# One share binds the fixed page and noVNC ports at a time. start waits until
+# the previous share has released them, including a stop that is still closing.
+_bind_cv = threading.Condition()
+_bind_owner: HandoffShare | None = None
 
 NOVNC_WEB = "/usr/share/novnc"
 WEBHOOK_ENV = "AGENT_TOOLS_NOTIFY_WEBHOOK"
@@ -48,6 +56,24 @@ _HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
 
 class ShareError(RuntimeError):
     pass
+
+
+def _failure_text(exc: BaseException, stderr: str) -> str:
+    message = str(exc).strip() or type(exc).__name__
+    if stderr and stderr not in message:
+        message = f"{message}; {stderr}".strip("; ")
+    return message
+
+
+def _bind_failure(kind: str, port: int, exc: BaseException) -> str:
+    err_no = getattr(exc, "errno", None)
+    if isinstance(err_no, int):
+        err_text = f"{errno.errorcode.get(err_no, 'errno')} ({err_no})"
+    else:
+        err_text = str(exc).strip() or type(exc).__name__
+    holder = describe_port_holder(port) if port > 0 else ""
+    held = f"held by {holder}" if holder else "no listener found"
+    return f"bind failed for {kind} port {port}: {err_text}; {held}"
 
 
 class NotifyError(RuntimeError):
@@ -121,10 +147,21 @@ class HandoffShare:
         self._public_page_port: int | None = None
         self._public_novnc_port: int | None = None
         self._reason = ""
+        self._starting = False
+        self._stop_requested = False
 
     def start(self, reason: str = "") -> None:
+        """Bind the page and noVNC. Waits if another share still holds the ports."""
+
+        global _bind_owner
         self._reason = reason
         self._state_dir.mkdir(parents=True, exist_ok=True)
+        with _bind_cv:
+            while _bind_owner is not None:
+                _bind_cv.wait()
+            _bind_owner = self
+            self._starting = True
+        started = False
         try:
             settings = listen_settings()
             self._bind_host = settings.bind_host
@@ -137,10 +174,26 @@ class HandoffShare:
             self._start_x11vnc()
             self._start_websockify()
             self._start_page()
+            started = True
         except Exception as exc:
-            detail = self._stderr_tail()
-            self.stop()
-            raise ShareError(f"{exc}; {detail}".strip()) from exc
+            self._close_listeners()
+            message = _failure_text(exc, self._stderr_tail())
+            log.error("handoff share failed: %s", message)
+            raise ShareError(message) from exc
+        finally:
+            release = False
+            with _bind_cv:
+                self._starting = False
+                if not started or self._stop_requested:
+                    release = _bind_owner is self
+                _bind_cv.notify_all()
+            if release:
+                if self._stop_requested:
+                    self._close_listeners()
+                with _bind_cv:
+                    if _bind_owner is self:
+                        _bind_owner = None
+                        _bind_cv.notify_all()
 
     def notify(self, reason: str, timeout: int, webhook: str) -> None:
         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=timeout)).isoformat()
@@ -164,6 +217,24 @@ class HandoffShare:
         return self._done.wait(seconds)
 
     def stop(self) -> None:
+        """Close listeners and release the ports before returning."""
+
+        global _bind_owner
+        with _bind_cv:
+            self._stop_requested = True
+            while self._starting:
+                _bind_cv.wait()
+            owns = _bind_owner is self
+        if not owns:
+            self._close_listeners()
+            return
+        self._close_listeners()
+        with _bind_cv:
+            if _bind_owner is self:
+                _bind_owner = None
+                _bind_cv.notify_all()
+
+    def _close_listeners(self) -> None:
         httpd = self._httpd
         thread = self._thread
         self._httpd = None
@@ -178,6 +249,19 @@ class HandoffShare:
         self._websockify = None
         stop_tracked(self._x11vnc, self._markers)
         self._x11vnc = None
+        self._wait_ports_closed()
+
+    def _wait_ports_closed(self) -> None:
+        ports = [port for port in (self.page_port, self.novnc_port) if port > 0]
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if all(not port_is_open(port) for port in ports):
+                return
+            time.sleep(0.02)
+        for port in ports:
+            if port_is_open(port):
+                holder = describe_port_holder(port) or "no listener found"
+                log.warning("port %s still listening after handoff stop: %s", port, holder)
 
     def _start_x11vnc(self) -> None:
         log_path = self._state_dir / "x11vnc.log"
@@ -229,7 +313,15 @@ class HandoffShare:
             stderr_path=log_path,
         )
         self._websockify = tracked
-        wait_until_listening(self.novnc_port, tracked, host=probe_host(self._bind_host))
+        try:
+            wait_until_listening(self.novnc_port, tracked, host=probe_host(self._bind_host))
+        except ProcessError as exc:
+            failure = _bind_failure("websockify", self.novnc_port, exc)
+            tail = tail_file(self._state_dir / "websockify.log")
+            if "Address already in use" in tail and "Address already in use" not in failure:
+                failure = f"{failure}; Address already in use"
+            log.error("%s", failure)
+            raise ShareError(failure) from exc
 
     def _start_page(self) -> None:
         iframe_port = self.novnc_port if self._public_novnc_port is None else self._public_novnc_port
@@ -242,7 +334,12 @@ class HandoffShare:
         ).encode("utf-8")
         handler = _handler_class(self._token, page, self._accept)
         page_port = 0 if self._page_port_pref is None else self._page_port_pref
-        httpd = _ReuseHTTPServer((self._bind_host, page_port), handler)
+        try:
+            httpd = _ReuseHTTPServer((self._bind_host, page_port), handler)
+        except OSError as exc:
+            failure = _bind_failure("handoff page", page_port, exc)
+            log.error("%s", failure)
+            raise ShareError(failure) from exc
         httpd.daemon_threads = True
         self.page_port = httpd.server_address[1]
         public_page = self.page_port if self._public_page_port is None else self._public_page_port

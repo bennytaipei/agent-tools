@@ -145,6 +145,10 @@ def test_concurrent_sessions_share_one_profile_dir(tmp_path: Path) -> None:
     asyncio.run(_concurrent(tmp_path))
 
 
+def test_secondary_loads_auth_store_while_primary_is_running(tmp_path: Path) -> None:
+    asyncio.run(_secondary_sees_alpha(tmp_path))
+
+
 def test_stale_singleton_lock_does_not_block_primary(tmp_path: Path) -> None:
     asyncio.run(_stale_lock(tmp_path))
 
@@ -243,6 +247,41 @@ async def _concurrent(tmp_path: Path) -> None:
         async with _client(profile, None, channel="chromium") as fourth:
             assert await _has_cookie(fourth, origin, "keep", "1")
             assert not await _has_cookie(fourth, origin, "beta", "1")
+    finally:
+        site.shutdown()
+        site.server_close()
+        reap(_markers(profile))
+
+
+async def _wait_store_contains(profile: Path, needle: str) -> None:
+    path = profile / AUTH_NAME
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        if path.is_file() and needle in path.read_text(encoding="utf-8"):
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError(f"{path} never contained {needle}")
+
+
+async def _secondary_sees_alpha(tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    site = _start_cookie_site()
+    origin = f"http://127.0.0.1:{site.server_address[1]}"
+    try:
+        async with _client(profile, None, channel="chromium") as primary:
+            await _set_cookie(primary, origin, "alpha", "1", "86400")
+            await _wait_store_contains(profile, "alpha")
+            async with _client(profile, None, channel="chromium") as secondary:
+                assert await _has_cookie(secondary, origin, "alpha", "1")
+                shared, private = _chrome_roles(profile)
+                assert shared, "primary chrome is not on the shared profile"
+                assert private, "secondary chrome is not on a private profile"
+                await _set_cookie(secondary, origin, "beta", "1", "86400")
+                await _wait_store_contains(profile, "beta")
+        async with _client(profile, None, channel="chromium") as fresh:
+            assert await _has_cookie(fresh, origin, "alpha", "1")
+            assert await _has_cookie(fresh, origin, "beta", "1")
     finally:
         site.shutdown()
         site.server_close()

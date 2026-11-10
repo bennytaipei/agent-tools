@@ -50,7 +50,7 @@ from agent_tools_browser.processes import (
     stop_tracked,
     tail_file,
 )
-from agent_tools_browser.validate import is_http_url
+from agent_tools_browser.validate import ToolFailure, is_http_url
 
 log = logging.getLogger("agent_tools_browser")
 
@@ -333,7 +333,7 @@ class BrowserSession:
             return "no_session"
         return self._page
 
-    async def click(self, arguments: dict) -> dict | str:
+    async def click(self, arguments: object) -> dict | str:
         page = self._require_page()
         if isinstance(page, str):
             return page
@@ -345,7 +345,7 @@ class BrowserSession:
             return page
         return await interact_type(page, arguments)
 
-    async def scroll(self, arguments: dict) -> dict | str:
+    async def scroll(self, arguments: object) -> dict | str:
         page = self._require_page()
         if isinstance(page, str):
             return page
@@ -374,14 +374,16 @@ class BrowserSession:
             return "notify_failed"
         try:
             prepare_done_when(done_when)
-        except ShareError:
-            log.exception("handoff done_when rejected")
-            return "share_failed"
+        except ShareError as exc:
+            detail = str(exc).strip() or "done_when was rejected"
+            log.error("handoff done_when rejected: %s", detail)
+            return ToolFailure("share_failed", detail)
         try:
             await self.ensure_started()
-        except Exception:
-            log.exception("browser failed to start for handoff")
-            return "share_failed"
+        except Exception as exc:
+            detail = f"browser failed to start: {exc}"
+            log.error("handoff share failed: %s", detail)
+            return ToolFailure("share_failed", detail)
         assert self._display and self._auth is not None and self._state is not None
         share = HandoffShare(self._display, self._auth, self._state, self._markers)
         self._share = share
@@ -392,9 +394,10 @@ class BrowserSession:
         except NotifyError:
             log.exception("handoff notify failed")
             return "notify_failed"
-        except (ShareError, ProcessError, OSError):
-            log.exception("handoff share failed")
-            return "share_failed"
+        except (ShareError, ProcessError, OSError) as exc:
+            detail = str(exc).strip() or "handoff share failed"
+            log.error("handoff share failed: %s", detail)
+            return ToolFailure("share_failed", detail)
         finally:
             try:
                 await asyncio.to_thread(share.stop)

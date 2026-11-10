@@ -158,7 +158,10 @@ def _closed_port() -> int:
 def _error_code(result) -> str:
     assert result.is_error is True
     body = json.loads(result.content[0].text)
-    assert list(body) == ["code"]
+    assert "code" in body
+    assert set(body) <= {"code", "detail"}
+    if "detail" in body:
+        assert isinstance(body["detail"], str) and body["detail"]
     return body["code"]
 
 
@@ -263,6 +266,16 @@ def _client(
 
 async def _call(client: Client, name: str, arguments: dict | None = None):
     return await client.call_tool(name, arguments or {})
+
+
+async def _call_raw(client: Client, name: str, arguments: object):
+    """tools/call with a non-object arguments value, which the typed client rejects."""
+
+    from mcp.types import CallToolRequest, CallToolRequestParams, CallToolResult
+
+    params = CallToolRequestParams.model_construct(name=name, arguments=arguments)
+    request = CallToolRequest.model_construct(method="tools/call", params=params)
+    return await client.session.send_request(request, CallToolResult)
 
 
 def test_exposed_mcp_tool_names() -> None:
@@ -1520,6 +1533,41 @@ async def _assert_interaction_actions(client: Client, url: str) -> None:
     await _call(client, "navigate", {"url": url})
     right = await _ok(client, "click", {"target": {"css": "#open"}, "button": "right"})
     assert right["title"] == "right-click"
+
+    await _call(client, "navigate", {"url": url})
+    search = await _ok(client, "click", {"target": {"placeholder": "Search Admin Resources"}})
+    assert search["title"] == "search-clicked"
+    email = await _ok(client, "click", {"target": {"label": "Email address"}})
+    assert email["title"] == "email-clicked"
+    bare = await _ok(client, "click", {"target": "Search Admin Resources"})
+    assert bare["title"] == "search-clicked"
+    bare_args = await _call_raw(client, "click", "Search Admin Resources")
+    assert bare_args.is_error is False
+    assert _payload(bare_args)["title"] == "search-clicked"
+    unknown = await _call(client, "click", {"target": {"widget": "nope"}})
+    unknown_body = json.loads(unknown.content[0].text)
+    assert unknown_body["code"] == "invalid_target"
+    assert "placeholder" in unknown_body["detail"]
+    assert "Search Admin Resources" in unknown_body["detail"]
+
+    await _call(client, "navigate", {"url": url})
+    numbered = await _call_raw(client, "scroll", 2200)
+    assert numbered.is_error is False, numbered
+    assert _payload(numbered)["scroll_y"] == 2200
+    by_scroll_y = await _ok(client, "scroll", {"scroll_y": 0})
+    assert by_scroll_y["scroll_y"] == 0
+    by_y = await _ok(client, "scroll", {"y": 2200})
+    assert by_y["scroll_y"] == 2200
+    by_scroll_y = await _ok(client, "scroll", {"scroll_y": 2200})
+    assert by_scroll_y["scroll_y"] == 2200
+    await _ok(client, "scroll", {"to": "top"})
+    nudged = await _ok(client, "scroll", {"delta": 200})
+    assert 150 <= nudged["scroll_y"] <= 280
+    still = await _ok(client, "scroll", {"delta": {"dx": 0, "dy": 200}})
+    assert 300 <= still["scroll_y"] <= 520
+    rejected = await _call_raw(client, "scroll", "nope")
+    assert _error_code(rejected) == "invalid_target"
+    assert "2200" in json.loads(rejected.content[0].text)["detail"]
 
 
 async def _ok(client: Client, name: str, arguments: dict) -> dict:

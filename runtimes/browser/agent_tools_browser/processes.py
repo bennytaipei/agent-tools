@@ -208,6 +208,8 @@ def wait_until_listening(
 
 
 def port_is_open(port: int) -> bool:
+    if port <= 0:
+        return False
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.3)
         try:
@@ -215,6 +217,55 @@ def port_is_open(port: int) -> bool:
         except OSError:
             return False
     return True
+
+
+def describe_port_holder(port: int) -> str:
+    """Process command lines that still LISTEN on this TCP port. Empty if none."""
+
+    if port <= 0:
+        return ""
+    inodes: set[str] = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            lines = Path(f"/proc/net/{name}").read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) < 10 or parts[3] != "0A":
+                continue
+            hex_port = parts[1].rsplit(":", 1)[-1]
+            try:
+                found = int(hex_port, 16) == port
+            except ValueError:
+                continue
+            if found:
+                inodes.add(parts[9])
+    if not inodes:
+        return ""
+    holders: list[str] = []
+    proc = Path("/proc")
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        fd_dir = entry / "fd"
+        try:
+            fds = list(fd_dir.iterdir())
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                target = os.readlink(fd)
+            except OSError:
+                continue
+            if not (target.startswith("socket:[") and target.endswith("]")):
+                continue
+            if target[8:-1] not in inodes:
+                continue
+            command = cmdline(int(entry.name))[:160]
+            holders.append(f"pid {entry.name} {command}".strip())
+            break
+    return "; ".join(holders)
 
 
 def tail_file(path: Path, limit: int = 2000) -> str:

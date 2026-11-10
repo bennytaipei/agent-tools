@@ -188,8 +188,37 @@ _FOCUSED_EDITABLE_JS = """
 """
 
 
-def _is_point(target: dict) -> bool:
-    return "x" in target and "y" in target
+def _is_point(target: object) -> bool:
+    return isinstance(target, dict) and "x" in target and "y" in target
+
+
+async def _resolve_bare(page: Page, text: str) -> tuple[object | None, str | None]:
+    """placeholder, then label, then text, then CSS. One unique match wins."""
+
+    found: list[tuple[object, int]] = []
+    builders = (
+        lambda: page.get_by_placeholder(text),
+        lambda: page.get_by_label(text),
+        lambda: page.get_by_text(text),
+        lambda: page.locator(text),
+    )
+    for build in builders:
+        try:
+            locator = build()
+            count = await locator.count()
+        except Exception as exc:
+            log.info("bare target strategy failed: %s", exc)
+            continue
+        if count > 0:
+            found.append((locator, count))
+    if not found:
+        return None, "not_found"
+    if len(found) > 1:
+        return None, "ambiguous"
+    locator, count = found[0]
+    if count > 1:
+        return None, "ambiguous"
+    return locator, None
 
 
 def _action_error(exc: Exception) -> str:
@@ -247,9 +276,17 @@ async def _finish(page: Page, scroll_y: int | None = None) -> dict | str:
     }
 
 
-async def _resolve_locator(page: Page, target: dict) -> tuple[object | None, str | None]:
+async def _resolve_locator(page: Page, target: object) -> tuple[object | None, str | None]:
+    if isinstance(target, str):
+        return await _resolve_bare(page, target)
+    if not isinstance(target, dict):
+        return None, "invalid_target"
     try:
-        if "role" in target:
+        if "placeholder" in target:
+            locator = page.get_by_placeholder(str(target["placeholder"]))
+        elif "label" in target:
+            locator = page.get_by_label(str(target["label"]))
+        elif "role" in target:
             kwargs = {}
             if "name" in target:
                 kwargs["name"] = target["name"]
@@ -337,7 +374,11 @@ async def _click_point(page: Page, target: dict, button: str, click_count: int, 
     return None
 
 
-async def click(page: Page, arguments: dict) -> dict | str:
+async def click(page: Page, arguments: object) -> dict | str:
+    if isinstance(arguments, str):
+        arguments = {"target": arguments}
+    if not isinstance(arguments, dict) or "target" not in arguments:
+        return "invalid_target"
     target = arguments["target"]
     button = str(arguments.get("button") or "left")
     click_count = int(arguments.get("click_count") or 1)
@@ -437,7 +478,46 @@ def _scroll_spec(arguments: dict) -> dict:
     return spec
 
 
-async def scroll(page: Page, arguments: dict) -> dict | str:
+def _normalize_scroll(arguments: object) -> dict | None:
+    """Number, scroll_y, and y are absolute page offsets. A numeric delta is dy."""
+
+    if isinstance(arguments, bool) or arguments is None:
+        return None
+    if isinstance(arguments, (int, float)):
+        return {"_absolute": int(arguments)}
+    if not isinstance(arguments, dict):
+        return None
+    args = dict(arguments)
+    delta = args.get("delta")
+    if isinstance(delta, bool):
+        return None
+    if isinstance(delta, (int, float)):
+        args["delta"] = {"dx": 0, "dy": delta}
+    has_move = "delta" in args or "to" in args or args.get("target") is not None
+    if not has_move:
+        if "scroll_y" in args:
+            args["_absolute"] = int(args["scroll_y"])
+        elif "y" in args:
+            args["_absolute"] = int(args["y"])
+        else:
+            return None
+    return args
+
+
+async def scroll(page: Page, arguments: object) -> dict | str:
+    normalized = _normalize_scroll(arguments)
+    if normalized is None:
+        return "invalid_target"
+    if normalized.get("_absolute") is not None and normalized.get("target") is None:
+        try:
+            failed = await _scroll_page_to(page, int(normalized["_absolute"]))
+        except Exception as exc:
+            log.info("scroll failed: %s", exc)
+            return _action_error(exc)
+        if failed:
+            return failed
+        return await _finish(page)
+    arguments = normalized
     target = arguments.get("target")
     spec = _scroll_spec(arguments)
     try:
@@ -593,7 +673,7 @@ async def wait_for(page: Page, arguments: dict) -> dict | str:
 
     target = arguments.get("target")
     state = arguments.get("state")
-    if not isinstance(target, dict) or state not in {"visible", "hidden"} or _is_point(target):
+    if not isinstance(target, (dict, str)) or state not in {"visible", "hidden"} or _is_point(target):
         return "invalid_target"
 
     async def locator_state():

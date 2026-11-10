@@ -23,14 +23,24 @@
       "pattern": "^[a-z][a-z0-9]*(_[a-z0-9]+)*$"
     },
     "object_schema": {
-      "description": "A JSON Schema document whose instance type is object.",
+      "description": "A JSON Schema for a tool payload. An object, or a oneOf/anyOf combinator. browser.scroll also accepts a number. browser.click also accepts a string.",
       "type": "object",
-      "required": ["type"],
-      "properties": {
-        "type": {
-          "const": "object"
+      "anyOf": [
+        {
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "const": "object"
+            }
+          }
+        },
+        {
+          "required": ["oneOf"]
+        },
+        {
+          "required": ["anyOf"]
         }
-      }
+      ]
     }
   },
   "properties": {

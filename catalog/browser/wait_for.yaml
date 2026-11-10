@@ -1,13 +1,42 @@
 name: browser.wait_for
-version: 1.0.0
-when_to_use: Wait until the current page shows a locator, hides a locator, contains text, matches a URL, or reaches a load state.
+version: 1.1.0
+when_to_use: 'Wait until the current page matches. target plus state (visible or hidden), or text, or url_matches, or load_state. timeout_ms is milliseconds, default 10000. target is placeholder, label, text, css, role and optional name, or a string. Example: {"target":{"placeholder":"Search Admin Resources"},"state":"visible"}.'
 inputs:
   type: object
   additionalProperties: false
   properties:
     target:
-      description: Locator to wait for. Use with state.
+      description: Locator to wait for. Use with state. placeholder, label, text, css, role and name, or a string.
       oneOf:
+        - type: string
+          minLength: 1
+          description: Bare target. Resolved with get_by_placeholder, then get_by_label, then get_by_text, then as a CSS selector.
+        - type: object
+          additionalProperties: false
+          required:
+            - placeholder
+          properties:
+            placeholder:
+              type: string
+              minLength: 1
+              description: Placeholder text for Playwright get_by_placeholder.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
+        - type: object
+          additionalProperties: false
+          required:
+            - label
+          properties:
+            label:
+              type: string
+              minLength: 1
+              description: Label text for Playwright get_by_label.
+            nth:
+              type: integer
+              minimum: 0
+              description: Zero-based match when the locator matches more than one element.
         - type: object
           additionalProperties: false
           required:

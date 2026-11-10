@@ -8,6 +8,8 @@ import logging
 import os
 import signal
 import sys
+from dataclasses import replace
+from typing import Any
 
 from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
@@ -24,11 +26,45 @@ from mcp.types import (
 from agent_tools_browser.catalog import CatalogError, load_browser_manifests, mcp_tool_bindings
 from agent_tools_browser.session import READ_MAX_VIEWPORTS_DEFAULT, BrowserSession, normalize_max_viewports
 from agent_tools_browser.validate import (
+    ToolFailure,
     declared_codes,
     input_failure_code,
+    input_hint,
     operation_failure_code,
     schema_errors,
 )
+
+
+class _LooseCallParams(CallToolRequestParams):
+    """tools/call arguments are a JSON value. scroll accepts a number, click a string."""
+
+    arguments: Any = None
+
+
+class _BareArguments:
+    """Turn a bare scroll number or click string into an object before spec checks.
+
+    The MCP wire schema requires arguments to be an object. A scroll number
+    becomes ``{"scroll_y": N}``. A click string becomes ``{"target": text}``.
+    Any other non-object scroll value becomes ``{}`` so the tool returns
+    ``invalid_target`` instead of a protocol error. A number is never rewritten
+    to ``{}``.
+    """
+
+    async def __call__(self, ctx: ServerRequestContext, call_next):  # type: ignore[no-untyped-def]
+        params = ctx.params
+        if ctx.method == "tools/call" and isinstance(params, dict):
+            arguments = params.get("arguments")
+            name = params.get("name")
+            if name == "scroll" and not isinstance(arguments, dict):
+                if isinstance(arguments, (int, float)) and not isinstance(arguments, bool):
+                    arguments = {"scroll_y": int(arguments)}
+                else:
+                    arguments = {}
+                ctx = replace(ctx, params={**params, "arguments": arguments})
+            elif name == "click" and isinstance(arguments, str) and arguments.strip():
+                ctx = replace(ctx, params={**params, "arguments": {"target": arguments}})
+        return await call_next(ctx)
 
 log = logging.getLogger("agent_tools_browser")
 
@@ -47,6 +83,10 @@ class BrowserRuntime:
             on_list_tools=self._list_tools,
             on_call_tool=self._call_tool,
         )
+        # The stock params model only accepts an object. Replace it so a bare
+        # number or string reaches schema validation instead of becoming {}.
+        self._mcp.add_request_handler("tools/call", _LooseCallParams, self._call_tool)
+        self._mcp.middleware.insert(0, _BareArguments())
 
     async def serve(self) -> None:
         loop = asyncio.get_running_loop()
@@ -130,29 +170,51 @@ class BrowserRuntime:
             # Not a tool result code. The protocol reports an unknown method.
             raise ValueError(f"unknown tool {params.name}")
         manifest = self._manifests[qualified]
-        arguments = params.arguments if isinstance(params.arguments, dict) else {}
-        problems = schema_errors(manifest["inputs"], arguments)
+        raw = params.arguments
+        if qualified in {"browser.scroll", "browser.click"}:
+            arguments: object = {} if raw is None else raw
+        else:
+            arguments = raw if isinstance(raw, dict) else {}
+        # A bare number or string is not an object. The published schema still
+        # says type object so tools/list can serialize it. Validate that form here.
+        if _bare_argument_ok(qualified, arguments):
+            problems = []
+        else:
+            problems = schema_errors(manifest["inputs"], arguments)
         if problems:
-            log.info("rejected %s input: %s", params.name, "; ".join(problems))
-            return _error(input_failure_code(manifest))
+            detail = input_hint(qualified)
+            log.info("rejected %s input: %s; %s", params.name, "; ".join(problems), detail)
+            return _error(input_failure_code(manifest), detail)
         async with self._lock:
             try:
                 outcome = await self._dispatch(qualified, arguments)
             except Exception:
                 log.exception("tool %s failed", params.name)
                 outcome = operation_failure_code(manifest)
+        if isinstance(outcome, ToolFailure):
+            if outcome.code not in declared_codes(manifest):
+                log.error("refusing undeclared code %s for %s", outcome.code, params.name)
+                return _error(operation_failure_code(manifest), outcome.detail)
+            return _error(outcome.code, outcome.detail)
         if isinstance(outcome, str):
             if outcome not in declared_codes(manifest):
                 log.error("refusing undeclared code %s for %s", outcome, params.name)
                 outcome = operation_failure_code(manifest)
-            return _error(outcome)
+            detail = input_hint(qualified) if outcome == "invalid_target" else None
+            return _error(outcome, detail)
         output_problems = schema_errors(manifest["outputs"], outcome)
         if output_problems:
             log.error("result for %s failed its output schema: %s", params.name, "; ".join(output_problems))
             return _error(operation_failure_code(manifest))
         return _success(outcome, _result_images(qualified, outcome))
 
-    async def _dispatch(self, name: str, arguments: dict) -> dict | str:
+    async def _dispatch(self, name: str, arguments: object) -> dict | str | ToolFailure:
+        if name == "browser.click":
+            return await self._browser.click(arguments)
+        if name == "browser.scroll":
+            return await self._browser.scroll(arguments)
+        if not isinstance(arguments, dict):
+            arguments = {}
         if name == "browser.navigate":
             return await self._browser.navigate(str(arguments["url"]))
         if name == "browser.read":
@@ -170,12 +232,8 @@ class BrowserRuntime:
                 int(arguments["timeout"]),
                 done_when if isinstance(done_when, dict) else None,
             )
-        if name == "browser.click":
-            return await self._browser.click(arguments)
         if name == "browser.type":
             return await self._browser.type_text(arguments)
-        if name == "browser.scroll":
-            return await self._browser.scroll(arguments)
         if name == "browser.select":
             return await self._browser.select(arguments)
         if name == "browser.wait_for":
@@ -183,9 +241,22 @@ class BrowserRuntime:
         raise ValueError(name)
 
 
-def _error(code: str) -> CallToolResult:
+def _bare_argument_ok(qualified: str, arguments: object) -> bool:
+    """scroll 2200 and click "Search…" are accepted even though type is object."""
+
+    if qualified == "browser.scroll" and isinstance(arguments, (int, float)) and not isinstance(arguments, bool):
+        return True
+    if qualified == "browser.click" and isinstance(arguments, str) and arguments.strip():
+        return True
+    return False
+
+
+def _error(code: str, detail: str | None = None) -> CallToolResult:
+    body: dict[str, str] = {"code": code}
+    if detail:
+        body["detail"] = detail
     return CallToolResult(
-        content=[TextContent(type="text", text=json.dumps({"code": code}))],
+        content=[TextContent(type="text", text=json.dumps(body))],
         is_error=True,
     )
 

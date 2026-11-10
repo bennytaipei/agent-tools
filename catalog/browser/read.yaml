@@ -1,6 +1,6 @@
 name: browser.read
 version: 2.0.0
-when_to_use: Read the current page by looking at the screenshots, the way a person looks at the screen. One image is one viewport. When truncated is true, call again with a higher max_viewports to see the rest of the page.
+when_to_use: 'Read the current page as viewport screenshots, the way a person looks at the screen. max_viewports is an integer from 1 to 30, default 10, and is how many viewports to capture. One image is one viewport. When truncated is true, call again with a higher max_viewports to see the rest of the page. Example: {"max_viewports":10}.'
 inputs:
   type: object
   additionalProperties: false

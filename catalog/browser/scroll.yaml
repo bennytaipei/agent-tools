@@ -1,102 +1,151 @@
 name: browser.scroll
-version: 1.0.0
-when_to_use: Scroll the current page or a container. target scrolls that element into view, or scrolls that container when delta or to is set.
+version: 1.1.0
+when_to_use: 'Scroll the page or a container. A number, scroll_y, or y is an absolute page offset in CSS pixels, the same value browser.read reports as scroll_y. delta is {dx, dy} or a number of pixels down (dx 0). to is top or bottom. target scrolls that element into view, or scrolls that container when delta or to is set. target is placeholder, label, text, css, role and optional name, point {x, y, scroll_y}, or a string. Examples: 2200 and {"scroll_y":2200}.'
 inputs:
+  description: A number is an absolute page scroll_y. An object carries target, delta, to, scroll_y, or y.
   type: object
-  additionalProperties: false
-  properties:
-    target:
-      description: Element to scroll into view, or the container to scroll when delta or to is set. A locator, or a point in viewport CSS pixels.
-      oneOf:
-        - type: object
-          additionalProperties: false
-          required:
-            - role
-          properties:
-            role:
-              type: string
-              minLength: 1
-              description: ARIA role for Playwright get_by_role.
-            name:
-              type: string
-              minLength: 1
-              description: Accessible name for get_by_role.
-            nth:
-              type: integer
-              minimum: 0
-              description: Zero-based match when the locator matches more than one element.
-        - type: object
-          additionalProperties: false
-          required:
-            - text
-          properties:
-            text:
-              type: string
-              minLength: 1
-              description: Text for Playwright get_by_text.
-            exact:
-              type: boolean
-              description: When true, get_by_text matches the whole string.
-            nth:
-              type: integer
-              minimum: 0
-              description: Zero-based match when the locator matches more than one element.
-        - type: object
-          additionalProperties: false
-          required:
-            - css
-          properties:
-            css:
-              type: string
-              minLength: 1
-              description: CSS selector for Playwright locator.
-            nth:
-              type: integer
-              minimum: 0
-              description: Zero-based match when the locator matches more than one element.
-        - type: object
-          additionalProperties: false
-          required:
-            - x
-            - y
-          properties:
-            x:
-              type: number
-              description: Horizontal viewport CSS pixel.
-            y:
-              type: number
-              description: Vertical viewport CSS pixel.
-            scroll_y:
-              type: integer
-              minimum: 0
-              description: Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y.
-    delta:
-      type: object
+  oneOf:
+    - type: number
+      description: Absolute page scroll_y in CSS pixels. Same meaning as browser.read viewport scroll_y.
+    - type: object
       additionalProperties: false
-      description: Scroll by this many CSS pixels.
-      required:
-        - dx
-        - dy
       properties:
-        dx:
-          type: number
-          description: Horizontal scroll delta in CSS pixels.
-        dy:
-          type: number
-          description: Vertical scroll delta in CSS pixels.
-    to:
-      type: string
-      enum:
-        - top
-        - bottom
-      description: Scroll to the top or the bottom of the page or target container.
-  anyOf:
-    - required:
-        - target
-    - required:
-        - delta
-    - required:
-        - to
+        target:
+          description: Element to scroll into view, or the container to scroll when delta or to is set. placeholder, label, text, css, role and name, a point, or a string.
+          oneOf:
+            - type: string
+              minLength: 1
+              description: Bare target. Resolved with get_by_placeholder, then get_by_label, then get_by_text, then as a CSS selector.
+            - type: object
+              additionalProperties: false
+              required:
+                - placeholder
+              properties:
+                placeholder:
+                  type: string
+                  minLength: 1
+                  description: Placeholder text for Playwright get_by_placeholder.
+                nth:
+                  type: integer
+                  minimum: 0
+                  description: Zero-based match when the locator matches more than one element.
+            - type: object
+              additionalProperties: false
+              required:
+                - label
+              properties:
+                label:
+                  type: string
+                  minLength: 1
+                  description: Label text for Playwright get_by_label.
+                nth:
+                  type: integer
+                  minimum: 0
+                  description: Zero-based match when the locator matches more than one element.
+            - type: object
+              additionalProperties: false
+              required:
+                - role
+              properties:
+                role:
+                  type: string
+                  minLength: 1
+                  description: ARIA role for Playwright get_by_role.
+                name:
+                  type: string
+                  minLength: 1
+                  description: Accessible name for get_by_role.
+                nth:
+                  type: integer
+                  minimum: 0
+                  description: Zero-based match when the locator matches more than one element.
+            - type: object
+              additionalProperties: false
+              required:
+                - text
+              properties:
+                text:
+                  type: string
+                  minLength: 1
+                  description: Text for Playwright get_by_text.
+                exact:
+                  type: boolean
+                  description: When true, get_by_text matches the whole string.
+                nth:
+                  type: integer
+                  minimum: 0
+                  description: Zero-based match when the locator matches more than one element.
+            - type: object
+              additionalProperties: false
+              required:
+                - css
+              properties:
+                css:
+                  type: string
+                  minLength: 1
+                  description: CSS selector for Playwright locator.
+                nth:
+                  type: integer
+                  minimum: 0
+                  description: Zero-based match when the locator matches more than one element.
+            - type: object
+              additionalProperties: false
+              required:
+                - x
+                - y
+              properties:
+                x:
+                  type: number
+                  description: Horizontal viewport CSS pixel.
+                y:
+                  type: number
+                  description: Vertical viewport CSS pixel.
+                scroll_y:
+                  type: integer
+                  minimum: 0
+                  description: Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y.
+        scroll_y:
+          type: integer
+          minimum: 0
+          description: Scroll the page to this absolute offset in CSS pixels.
+        y:
+          type: integer
+          minimum: 0
+          description: Same as scroll_y. Absolute page offset in CSS pixels.
+        delta:
+          description: Relative scroll. A number is dy with dx 0. An object is dx and dy in CSS pixels.
+          oneOf:
+            - type: number
+              description: Vertical delta in CSS pixels. dx is 0.
+            - type: object
+              additionalProperties: false
+              required:
+                - dx
+                - dy
+              properties:
+                dx:
+                  type: number
+                  description: Horizontal scroll delta in CSS pixels.
+                dy:
+                  type: number
+                  description: Vertical scroll delta in CSS pixels.
+        to:
+          type: string
+          enum:
+            - top
+            - bottom
+          description: Scroll to the top or the bottom of the page or target container.
+      anyOf:
+        - required:
+            - target
+        - required:
+            - delta
+        - required:
+            - to
+        - required:
+            - scroll_y
+        - required:
+            - y
 outputs:
   type: object
   additionalProperties: false

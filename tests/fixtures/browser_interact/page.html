@@ -38,6 +38,8 @@
 </head>
 <body>
   <button id="open" type="button">Open panel</button>
+  <input id="search" placeholder="Search Admin Resources" style="position:absolute;left:220px;top:8px;z-index:3;width:180px">
+  <label style="position:absolute;left:420px;top:8px;z-index:3">Email address <input id="email"></label>
   <div id="panel">
     <p id="panel-body">PANEL_OPEN</p>
     <label>Your name <input id="name"></label>
@@ -84,6 +86,12 @@
     });
     document.getElementById("below").addEventListener("click", function () {
       setTitle("below-clicked");
+    });
+    document.getElementById("search").addEventListener("click", function () {
+      setTitle("search-clicked");
+    });
+    document.getElementById("email").addEventListener("click", function () {
+      setTitle("email-clicked");
     });
     document.getElementById("twin-a").addEventListener("click", function () { setTitle("twin-0"); });
     document.getElementById("twin-b").addEventListener("click", function () { setTitle("twin-1"); });

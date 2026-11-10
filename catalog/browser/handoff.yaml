@@ -1,6 +1,6 @@
 name: browser.handoff
 version: 1.1.1
-when_to_use: The live page needs Benny, usually because it is a login wall. One call starts the share, notifies him, waits, and ends the share. Pass done_when to name the page after sign-in. url_matches ignores the query string and fragment. Only visible elements count.
+when_to_use: 'Hand the live page to Benny, usually because it is a login wall. reason is why he has the browser. timeout is seconds to wait. done_when optionally names the page after sign-in with url_matches, selector_present, or text_present. url_matches ignores the query string and fragment. Only visible elements count. One call starts the share, notifies him, waits, and ends the share. Example: {"reason":"login wall","timeout":120,"done_when":{"url_matches":"https://app.example/home"}}.'
 inputs:
   type: object
   additionalProperties: false

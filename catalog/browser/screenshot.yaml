@@ -1,6 +1,6 @@
 name: browser.screenshot
 version: 1.0.0
-when_to_use: Capture the current page as an image.
+when_to_use: 'Capture the current viewport as one PNG. This tool takes no input fields. Example: {}.'
 inputs:
   type: object
   additionalProperties: false
