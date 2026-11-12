@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>brief17</title>
+  <style>
+    html, body { margin: 0; font: 16px sans-serif; }
+  </style>
+</head>
+<body>
+  <input id="f" placeholder="Filter By Policy Name">
+  <div id="o"></div>
+  <div id="edit" contenteditable="true" style="min-height:24px;border:1px solid #999">edit</div>
+  <div class="my-wrap" style="width:600px;height:80px;overflow-x:auto;overflow-y:hidden;border:1px solid #000">
+    <table style="width:1800px;border-collapse:collapse">
+      <tr>
+        <td style="width:300px"><span id="cell">name</span></td>
+        <td style="width:1500px">actions</td>
+      </tr>
+    </table>
+  </div>
+  <div id="vscroll" style="width:180px;height:80px;overflow:auto;border:1px solid #00a">
+    <div style="height:600px">vertical</div>
+  </div>
+  <div class="el-table__header-wrapper">header</div>
+  <div class="el-row">row</div>
+  <div style="position:relative;width:140px;height:36px">
+    <button id="under" type="button">Under</button>
+    <div id="cover" style="position:absolute;left:0;top:0;width:140px;height:36px;background:#ccc">cover</div>
+  </div>
+  <button id="off" type="button" disabled>Off</button>
+  <input id="twin" placeholder="Hello twin">
+  <span>Hello twin</span>
+  <iframe id="fr" title="inner" style="width:520px;height:200px;border:1px solid #333" srcdoc='<div class="inner" style="width:220px;height:70px;overflow:auto"><div style="width:1200px;height:30px"><button id="go" type="button">Go</button></div></div><input placeholder="inframe" id="inf"><label>Frame email <input id="em"></label><p>Hello frame</p><div role="button">Frame action</div><div class="vinner" style="width:80px;height:40px;overflow:auto"><div style="height:400px">down</div></div>'></iframe>
+  <script>
+    var state = {value: ""};
+    var field = document.getElementById("f");
+    field.addEventListener("input", function () {
+      window.events = window.events || [];
+      window.events.push("input");
+      window.n = (window.n || 0) + 1;
+      state.value = field.value;
+      clearTimeout(window.t);
+      window.t = setTimeout(function () {
+        document.getElementById("o").textContent = "filtered:" + state.value;
+        window.renderedAt = Date.now();
+      }, 300);
+    });
+    field.addEventListener("change", function () {
+      window.events = window.events || [];
+      window.events.push("change");
+    });
+    field.addEventListener("keydown", function (ev) {
+      if (ev.key === "Enter") window.entered = true;
+    });
+  </script>
+</body>
+</html>
