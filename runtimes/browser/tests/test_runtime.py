@@ -1021,7 +1021,8 @@ async def _assert_navigation_failed(client: Client) -> None:
 
 async def _assert_navigate_read_screenshot(client: Client, site_port: int, landed: str) -> None:
     navigated = _payload(await _call(client, "navigate", {"url": f"http://127.0.0.1:{site_port}/go"}))
-    assert navigated == {"url": landed}
+    assert navigated["url"] == landed
+    assert navigated.get("status") == 200
     _assert_output(_BY_EXPOSED["navigate"], navigated)
 
     read_result = await _call(client, "read", {})

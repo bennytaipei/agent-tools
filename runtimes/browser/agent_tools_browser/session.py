@@ -64,6 +64,19 @@ SAVE_DEBOUNCE_S = 2.0
 SAVE_INTERVAL_S = 15.0
 
 
+def _navigation_detail(exc: Exception, downloaded: bool = False) -> str:
+    """First line of a Playwright error, with a download sentence when that is the cause."""
+
+    text = str(exc).split("Call log:")[0].strip()
+    line = text.splitlines()[0].strip() if text else "navigation failed"
+    if downloaded or "ERR_ABORTED" in text:
+        return (
+            "URL returns a file download; open the page that links to it, or use a different URL"
+            + (f" ({line})" if line else "")
+        )
+    return line[:400]
+
+
 def _url_for_match(url: str) -> str:
     """Page URL without the query string or fragment."""
 
@@ -225,27 +238,52 @@ class BrowserSession:
         self._last_save_mono = 0.0
         self._activity_gen = 0
 
-    async def navigate(self, url: str) -> dict | str:
+    async def navigate(self, url: str) -> dict | str | ToolFailure:
         if not is_http_url(url):
-            return "invalid_url"
+            return ToolFailure(
+                "invalid_url",
+                'url must be an absolute http or https URL. Example: {"url":"https://example.com"}.',
+            )
         try:
             await self.ensure_started()
-        except Exception:
+        except Exception as exc:
             log.exception("browser failed to start")
-            return "navigation_failed"
+            return ToolFailure("navigation_failed", _navigation_detail(exc))
         # A refused connection keeps navigating to an error page on that tab.
         # The next call uses a new tab so the error navigation cannot interrupt it.
         page = await self._replace_page()
+        downloaded = False
+
+        def _on_download(_download) -> None:
+            nonlocal downloaded
+            downloaded = True
+
+        page.on("download", _on_download)
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
         except Exception as exc:
             log.error("navigation failed: %s", exc)
-            return "navigation_failed"
+            return ToolFailure("navigation_failed", _navigation_detail(exc, downloaded))
         final = page.url
         if not is_http_url(final) or final.startswith("chrome-error"):
-            return "navigation_failed"
+            return ToolFailure("navigation_failed", f"navigation ended on {final}")
+        status = response.status if response is not None else None
+        disposition = ""
+        if response is not None:
+            try:
+                disposition = response.headers.get("content-disposition", "")
+            except Exception:
+                disposition = ""
+        if downloaded or "attachment" in disposition.lower():
+            return ToolFailure(
+                "navigation_failed",
+                "URL returns a file download; open the page that links to it, or use a different URL",
+            )
         self._has_page = True
-        return {"url": final}
+        payload: dict = {"url": final}
+        if isinstance(status, int):
+            payload["status"] = status
+        return payload
 
     async def _replace_page(self) -> Page:
         assert self._context is not None
@@ -328,38 +366,42 @@ class BrowserSession:
             return "no_page"
         return {"image": base64.b64encode(png).decode("ascii")}
 
-    def _require_page(self) -> Page | str:
+    def _require_page(self) -> Page | ToolFailure:
         if not self._has_page or self._page is None:
-            return "no_session"
+            return ToolFailure(
+                "no_session",
+                "No page is open in this browser session. Call navigate with an absolute http(s) URL first; "
+                "the browser starts empty in each new agent session.",
+            )
         return self._page
 
-    async def click(self, arguments: object) -> dict | str:
+    async def click(self, arguments: object) -> dict | str | ToolFailure:
         page = self._require_page()
-        if isinstance(page, str):
+        if isinstance(page, ToolFailure):
             return page
         return await interact_click(page, arguments)
 
-    async def type_text(self, arguments: dict) -> dict | str:
+    async def type_text(self, arguments: dict) -> dict | str | ToolFailure:
         page = self._require_page()
-        if isinstance(page, str):
+        if isinstance(page, ToolFailure):
             return page
         return await interact_type(page, arguments)
 
-    async def scroll(self, arguments: object) -> dict | str:
+    async def scroll(self, arguments: object) -> dict | str | ToolFailure:
         page = self._require_page()
-        if isinstance(page, str):
+        if isinstance(page, ToolFailure):
             return page
         return await interact_scroll(page, arguments)
 
-    async def select(self, arguments: dict) -> dict | str:
+    async def select(self, arguments: dict) -> dict | str | ToolFailure:
         page = self._require_page()
-        if isinstance(page, str):
+        if isinstance(page, ToolFailure):
             return page
         return await interact_select(page, arguments)
 
-    async def wait_for(self, arguments: dict) -> dict | str:
+    async def wait_for(self, arguments: dict) -> dict | str | ToolFailure:
         page = self._require_page()
-        if isinstance(page, str):
+        if isinstance(page, ToolFailure):
             return page
         return await interact_wait_for(page, arguments)
 

@@ -29,6 +29,7 @@ from agent_tools_browser.validate import (
     ToolFailure,
     declared_codes,
     input_failure_code,
+    error_detail,
     input_hint,
     operation_failure_code,
     schema_errors,
@@ -180,7 +181,7 @@ class BrowserRuntime:
         if _bare_argument_ok(qualified, arguments):
             problems = []
         else:
-            problems = schema_errors(manifest["inputs"], arguments)
+            problems = schema_errors(manifest["inputs"], _schema_instance(qualified, arguments))
         if problems:
             detail = input_hint(qualified)
             log.info("rejected %s input: %s; %s", params.name, "; ".join(problems), detail)
@@ -194,18 +195,23 @@ class BrowserRuntime:
         if isinstance(outcome, ToolFailure):
             if outcome.code not in declared_codes(manifest):
                 log.error("refusing undeclared code %s for %s", outcome.code, params.name)
-                return _error(operation_failure_code(manifest), outcome.detail)
-            return _error(outcome.code, outcome.detail)
+                code = operation_failure_code(manifest)
+                return _error(code, outcome.detail or error_detail(qualified, code))
+            return _error(outcome.code, outcome.detail or error_detail(qualified, outcome.code))
         if isinstance(outcome, str):
             if outcome not in declared_codes(manifest):
                 log.error("refusing undeclared code %s for %s", outcome, params.name)
                 outcome = operation_failure_code(manifest)
-            detail = input_hint(qualified) if outcome == "invalid_target" else None
+            if outcome == "invalid_target":
+                detail = input_hint(qualified)
+            else:
+                detail = error_detail(qualified, outcome)
             return _error(outcome, detail)
         output_problems = schema_errors(manifest["outputs"], outcome)
         if output_problems:
             log.error("result for %s failed its output schema: %s", params.name, "; ".join(output_problems))
-            return _error(operation_failure_code(manifest))
+            code = operation_failure_code(manifest)
+            return _error(code, error_detail(qualified, code))
         return _success(outcome, _result_images(qualified, outcome))
 
     async def _dispatch(self, name: str, arguments: object) -> dict | str | ToolFailure:
@@ -239,6 +245,22 @@ class BrowserRuntime:
         if name == "browser.wait_for":
             return await self._browser.wait_for(arguments)
         raise ValueError(name)
+
+
+def _schema_instance(qualified: str, arguments: object) -> object:
+    """Schema view of arguments. A string target and a numeric delta stay in the real call."""
+
+    if not isinstance(arguments, dict):
+        return arguments
+    copied = dict(arguments)
+    target = copied.get("target")
+    if isinstance(target, str):
+        copied["target"] = {"css": target}
+    if qualified == "browser.scroll":
+        delta = copied.get("delta")
+        if isinstance(delta, (int, float)) and not isinstance(delta, bool):
+            copied["delta"] = {"dx": 0, "dy": delta}
+    return copied
 
 
 def _bare_argument_ok(qualified: str, arguments: object) -> bool:

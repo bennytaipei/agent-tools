@@ -1,11 +1,12 @@
 name: browser.navigate
-version: 1.0.0
-when_to_use: 'Open a URL in the remote browser. url is an absolute http or https URL. Example: {"url":"https://example.com"}.'
+version: 1.1.0
+when_to_use: 'Open a URL in the remote browser. url is an absolute http or https URL.
+  A JSON or text page loads. Example: {"url":"https://example.com"}.'
 inputs:
   type: object
   additionalProperties: false
   required:
-    - url
+  - url
   properties:
     url:
       type: string
@@ -15,17 +16,24 @@ outputs:
   type: object
   additionalProperties: false
   required:
-    - url
+  - url
   properties:
     url:
       type: string
       format: uri
       description: URL of the page after navigation, including redirects.
-side_effects: Loads the URL in the shared remote browser and replaces the current page.
+    status:
+      type: integer
+      minimum: 100
+      maximum: 599
+      description: HTTP status of the navigation response, when the browser received
+        one.
+side_effects: Loads the URL in the shared remote browser and replaces the current
+  page.
 errors:
-  - code: invalid_url
-    when: The url input is not an absolute URL the remote browser can open.
-  - code: navigation_failed
-    when: The remote browser could not load the URL.
+- code: invalid_url
+  when: The url input is not an absolute URL the remote browser can open.
+- code: navigation_failed
+  when: The remote browser could not load the URL.
 auth_needed:
-  - browser_session
+- browser_session

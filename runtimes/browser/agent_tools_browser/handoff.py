@@ -749,10 +749,12 @@ def _handler_class(token: str, html: bytes, accept):
             else:
                 self.send_error(404)
                 return
+            # Record the click before the response is flushed. A client that
+            # returns as soon as it reads 204 must already see the status.
+            accept(status)
             self.send_response(204)
             self.send_header("Content-Length", "0")
             self.end_headers()
-            accept(status)
 
         def log_message(self, fmt: str, *args) -> None:
             return

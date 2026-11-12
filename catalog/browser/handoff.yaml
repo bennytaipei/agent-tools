@@ -1,12 +1,16 @@
 name: browser.handoff
-version: 1.1.1
-when_to_use: 'Hand the live page to Benny, usually because it is a login wall. reason is why he has the browser. timeout is seconds to wait. done_when optionally names the page after sign-in with url_matches, selector_present, or text_present. url_matches ignores the query string and fragment. Only visible elements count. One call starts the share, notifies him, waits, and ends the share. Example: {"reason":"login wall","timeout":120,"done_when":{"url_matches":"https://app.example/home"}}.'
+version: 1.2.0
+when_to_use: 'Hand the live page to Benny, usually because it is a login wall. reason
+  is why he has the browser. timeout is seconds to wait. done_when optionally names
+  the page after sign-in with url_matches, selector_present, or text_present. url_matches
+  ignores the query string and fragment. Only visible elements count. One call starts
+  the share, notifies him, waits, and ends the share. Example: {"reason":"login wall","timeout":120,"done_when":{"url_matches":"https://app.example/home"}}.'
 inputs:
   type: object
   additionalProperties: false
   required:
-    - reason
-    - timeout
+  - reason
+  - timeout
   properties:
     reason:
       type: string
@@ -17,67 +21,70 @@ inputs:
       minimum: 1
       description: Seconds to block while Benny has the browser.
     done_when:
-      description: Names the page after sign-in, not the login page. Polled about once a second. Auto-complete only after the condition has been false at least once during this handoff and then true on two consecutive polls. A condition that is already true on the first poll does not auto-complete.
-      oneOf:
-        - type: object
-          additionalProperties: false
-          required:
-            - url_matches
-          properties:
-            url_matches:
-              type: string
-              minLength: 1
-              description: Regular expression matched against the page URL without its query string or fragment (scheme://host[:port]/path). Name a post-login path.
-        - type: object
-          additionalProperties: false
-          required:
-            - selector_present
-          properties:
-            selector_present:
-              type: string
-              minLength: 1
-              description: CSS selector for a visible element on the page after sign-in. Hidden elements do not count.
-        - type: object
-          additionalProperties: false
-          required:
-            - text_present
-          properties:
-            text_present:
-              type: string
-              minLength: 1
-              description: Substring of text that is visible on the page after sign-in. Hidden text does not count.
+      type: object
+      additionalProperties: false
+      description: Names the page after sign-in. Set url_matches, selector_present,
+        or text_present. Polled about once a second. Auto-complete only after the
+        condition has been false once and then true on two polls.
+      properties:
+        url_matches:
+          type: string
+          minLength: 1
+          description: Regular expression matched against the page URL without its
+            query string or fragment.
+        selector_present:
+          type: string
+          minLength: 1
+          description: CSS selector for a visible element on the page after sign-in.
+        text_present:
+          type: string
+          minLength: 1
+          description: Substring of visible text on the page after sign-in.
 outputs:
   type: object
   additionalProperties: false
   required:
-    - status
-    - completed_by
+  - status
+  - completed_by
   properties:
     status:
       type: string
       enum:
-        - done
-        - timeout
-        - cancelled
-      description: done when Done is clicked or done_when matches, timeout when the wait elapses, cancelled when Cancel is clicked.
+      - done
+      - timeout
+      - cancelled
+      description: done when Done is clicked or done_when matches, timeout when the
+        wait elapses, cancelled when Cancel is clicked.
     completed_by:
       type: string
       enum:
-        - user
-        - auto
-        - timeout
-        - cancelled
-      description: user when Done is clicked, auto when done_when matches, timeout when the wait elapses, cancelled when Cancel is clicked.
+      - user
+      - auto
+      - timeout
+      - cancelled
+      description: user when Done is clicked, auto when done_when matches, timeout
+        when the wait elapses, cancelled when Cancel is clicked.
     reason:
       type: string
       const: auto_detected
       description: Present when completed_by is auto.
-side_effects: Starts the HTTP noVNC share, shows a page with the banner "Sign in or finish the step, then click Done." and Done and Cancel buttons, notifies Benny, and blocks until he finishes, done_when has been false once in this handoff and then true on two consecutive polls, the timeout elapses, or the handoff is cancelled. url_matches is tested against the page URL without the query string or fragment. selector_present and text_present count only visible elements. A done_when that is already true on the first poll does not auto-complete. Returns status and completed_by. When auto-complete happens, status is done, completed_by is auto, and reason is auto_detected. Ends the share itself in every case. No separate start, stop, notify, or status action.
+side_effects: Starts the HTTP noVNC share, shows a page with the banner "Sign in or
+  finish the step, then click Done." and Done and Cancel buttons, notifies Benny,
+  and blocks until he finishes, done_when has been false once in this handoff and
+  then true on two consecutive polls, the timeout elapses, or the handoff is cancelled.
+  url_matches is tested against the page URL without the query string or fragment.
+  selector_present and text_present count only visible elements. A done_when that
+  is already true on the first poll does not auto-complete. Returns status and completed_by.
+  When auto-complete happens, status is done, completed_by is auto, and reason is
+  auto_detected. Ends the share itself in every case. No separate start, stop, notify,
+  or status action.
 errors:
-  - code: share_failed
-    when: The HTTP noVNC share could not be started or ended, done_when url_matches is not a valid regular expression, or done_when selector_present is not a valid selector.
-  - code: notify_failed
-    when: Benny could not be notified on the handoff channel.
+- code: share_failed
+  when: The HTTP noVNC share could not be started or ended, done_when url_matches
+    is not a valid regular expression, or done_when selector_present is not a valid
+    selector.
+- code: notify_failed
+  when: Benny could not be notified on the handoff channel.
 auth_needed:
-  - browser_session
-  - benny_notify_channel
+- browser_session
+- benny_notify_channel

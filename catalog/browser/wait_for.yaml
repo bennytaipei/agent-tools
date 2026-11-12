@@ -1,93 +1,66 @@
 name: browser.wait_for
-version: 1.1.0
-when_to_use: 'Wait until the current page matches. target plus state (visible or hidden), or text, or url_matches, or load_state. timeout_ms is milliseconds, default 10000. target is placeholder, label, text, css, role and optional name, or a string. Example: {"target":{"placeholder":"Search Admin Resources"},"state":"visible"}.'
+version: 1.2.0
+when_to_use: 'Wait until the current page matches. Pass target and state, or text,
+  or url_matches, or load_state. timeout_ms is milliseconds, default 10000. Example:
+  {"target":{"text":"Ready"},"state":"visible"}.'
 inputs:
   type: object
   additionalProperties: false
+  description: One of target plus state, text, url_matches, or load_state. timeout_ms
+    is optional.
   properties:
     target:
-      description: Locator to wait for. Use with state. placeholder, label, text, css, role and name, or a string.
-      oneOf:
-        - type: string
+      additionalProperties: false
+      description: Locator to wait for, with state. Precedence is placeholder, label,
+        role, text, then css. A point is not a wait target.
+      properties:
+        css:
+          description: CSS selector.
           minLength: 1
-          description: Bare target. Resolved with get_by_placeholder, then get_by_label, then get_by_text, then as a CSS selector.
-        - type: object
-          additionalProperties: false
-          required:
-            - placeholder
-          properties:
-            placeholder:
-              type: string
-              minLength: 1
-              description: Placeholder text for Playwright get_by_placeholder.
-            nth:
-              type: integer
-              minimum: 0
-              description: Zero-based match when the locator matches more than one element.
-        - type: object
-          additionalProperties: false
-          required:
-            - label
-          properties:
-            label:
-              type: string
-              minLength: 1
-              description: Label text for Playwright get_by_label.
-            nth:
-              type: integer
-              minimum: 0
-              description: Zero-based match when the locator matches more than one element.
-        - type: object
-          additionalProperties: false
-          required:
-            - role
-          properties:
-            role:
-              type: string
-              minLength: 1
-              description: ARIA role for Playwright get_by_role.
-            name:
-              type: string
-              minLength: 1
-              description: Accessible name for get_by_role.
-            nth:
-              type: integer
-              minimum: 0
-              description: Zero-based match when the locator matches more than one element.
-        - type: object
-          additionalProperties: false
-          required:
-            - text
-          properties:
-            text:
-              type: string
-              minLength: 1
-              description: Text for Playwright get_by_text.
-            exact:
-              type: boolean
-              description: When true, get_by_text matches the whole string.
-            nth:
-              type: integer
-              minimum: 0
-              description: Zero-based match when the locator matches more than one element.
-        - type: object
-          additionalProperties: false
-          required:
-            - css
-          properties:
-            css:
-              type: string
-              minLength: 1
-              description: CSS selector for Playwright locator.
-            nth:
-              type: integer
-              minimum: 0
-              description: Zero-based match when the locator matches more than one element.
+          type: string
+        exact:
+          description: When true, text matches the whole string.
+          type: boolean
+        label:
+          description: Label text for get_by_label.
+          minLength: 1
+          type: string
+        name:
+          description: Accessible name for get_by_role.
+          minLength: 1
+          type: string
+        nth:
+          description: Zero-based match in the winning frame.
+          minimum: 0
+          type: integer
+        placeholder:
+          description: Placeholder text for get_by_placeholder.
+          minLength: 1
+          type: string
+        role:
+          description: ARIA role for get_by_role.
+          minLength: 1
+          type: string
+        scroll_y:
+          description: Scroll the page to this offset before using x and y.
+          minimum: 0
+          type: integer
+        text:
+          description: Text for get_by_text.
+          minLength: 1
+          type: string
+        x:
+          description: Horizontal viewport CSS pixel from read.
+          type: number
+        y:
+          description: Vertical viewport CSS pixel from read.
+          type: number
+      type: object
     state:
       type: string
       enum:
-        - visible
-        - hidden
+      - visible
+      - hidden
       description: Wait until the locator is visible or hidden.
     text:
       type: string
@@ -100,9 +73,9 @@ inputs:
     load_state:
       type: string
       enum:
-        - load
-        - domcontentloaded
-        - networkidle
+      - load
+      - domcontentloaded
+      - networkidle
       description: Playwright load state to wait for.
     timeout_ms:
       type: integer
@@ -110,44 +83,15 @@ inputs:
       maximum: 120000
       default: 10000
       description: How long to wait, in milliseconds. Defaults to 10000.
-  oneOf:
-    - required:
-        - target
-        - state
-      properties:
-        text: false
-        url_matches: false
-        load_state: false
-    - required:
-        - text
-      properties:
-        target: false
-        state: false
-        url_matches: false
-        load_state: false
-    - required:
-        - url_matches
-      properties:
-        target: false
-        state: false
-        text: false
-        load_state: false
-    - required:
-        - load_state
-      properties:
-        target: false
-        state: false
-        text: false
-        url_matches: false
 outputs:
   type: object
   additionalProperties: false
   required:
-    - url
-    - title
-    - scroll_y
-    - viewport
-    - image
+  - url
+  - title
+  - scroll_y
+  - viewport
+  - image
   properties:
     url:
       type: string
@@ -165,8 +109,8 @@ outputs:
       additionalProperties: false
       description: Viewport size in CSS pixels.
       required:
-        - width
-        - height
+      - width
+      - height
       properties:
         width:
           type: integer
@@ -181,19 +125,20 @@ outputs:
       contentMediaType: image/png
       contentEncoding: base64
       description: PNG screenshot of the viewport when the wait ends.
-side_effects: None. Waits until the page matches the requested condition or the timeout elapses. Does not navigate, click, or type.
+side_effects: None. Waits until the page matches the requested condition or the timeout
+  elapses. Does not navigate, click, or type.
 errors:
-  - code: not_found
-    when: The locator matched no element when the wait required one to exist already.
-  - code: ambiguous
-    when: The locator matched more than one element and nth was not set.
-  - code: not_interactable
-    when: The element is present and its visibility cannot be read.
-  - code: timeout
-    when: The condition was not met before timeout_ms elapsed.
-  - code: invalid_target
-    when: The inputs do not describe one wait this tool can perform.
-  - code: no_session
-    when: The remote browser has no page.
+- code: not_found
+  when: The locator matched no element when the wait required one to exist already.
+- code: ambiguous
+  when: The locator matched more than one element and nth was not set.
+- code: not_interactable
+  when: The element is present and its visibility cannot be read.
+- code: timeout
+  when: The condition was not met before timeout_ms elapsed.
+- code: invalid_target
+  when: The inputs do not describe one wait this tool can perform.
+- code: no_session
+  when: The remote browser has no page.
 auth_needed:
-  - browser_session
+- browser_session

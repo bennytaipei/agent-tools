@@ -57,9 +57,9 @@ _INPUT_HINTS = {
         'css, role and name, point {x, y}, or a string. Example: {"target":{"label":"Email"},"text":"ada@example.com"}.'
     ),
     "browser.scroll": (
-        "A number, scroll_y, or y is an absolute page offset in CSS pixels. "
-        "delta is {dx, dy} or a number of pixels down. to is top or bottom. "
-        'Example: 2200 or {"scroll_y":2200}.'
+        "dx and dy scroll the container under target. scroll_y or y is an absolute page offset. "
+        "delta is {dx, dy} or a number of pixels down. to is top, bottom, left, or right. "
+        'Example: {"dx":600,"target":{"x":756,"y":425}} or 2200.'
     ),
     "browser.select": (
         "target is placeholder, label, text, css, role and name, point {x, y}, or a string. "
@@ -77,6 +77,39 @@ def input_hint(name: str) -> str:
     """What to send instead, for a schema or target-shape rejection."""
 
     return _INPUT_HINTS.get(name, "Send arguments that match this tool's input schema.")
+
+
+_ERROR_DETAILS = {
+    "invalid_url": 'url must be an absolute http or https URL. Example: {"url":"https://example.com"}.',
+    "navigation_failed": "The URL did not load. Check the host and path, or open the page that links to this URL.",
+    "no_page": "No page is open. Call navigate with an absolute http(s) URL first.",
+    "share_failed": "The handoff share failed. Retry handoff, or check the port and done_when.",
+    "notify_failed": "Could not notify Benny. Set the notify webhook and retry handoff.",
+    "not_found": "No element matched. Frames were searched. Use read, then a point target {x,y} or a narrower selector.",
+    "ambiguous": 'More than one element matched. Add "nth": 0..N-1 or a narrower target.',
+    "not_interactable": "The element cannot be used. Scroll the container, close an overlay, or use a point target {x,y}.",
+    "timeout": "The wait timed out. Raise timeout_ms or check the target.",
+    "invalid_target": (
+        "Target needs one of placeholder, label, role, text, css, or x and y. "
+        'Example: {"target":{"placeholder":"Search Admin Resources"}}.'
+    ),
+    "no_session": (
+        "No page is open in this browser session. Call navigate with an absolute http(s) URL first."
+    ),
+    "forbidden": "The call was forbidden. Check the account and retry.",
+    "throttled": "The call was throttled. Wait and retry.",
+}
+
+
+def error_detail(name: str, code: str) -> str:
+    """Fallback detail when a call returns a code without its own sentence."""
+
+    if code == "not_found" and not str(name).startswith("browser."):
+        return f"{name} did not find a match. Check the arguments and retry."
+    text = _ERROR_DETAILS.get(code)
+    if text:
+        return text
+    return f"{name} failed with {code}. Check the arguments and retry."
 
 
 def declared_codes(manifest: dict) -> list[str]:

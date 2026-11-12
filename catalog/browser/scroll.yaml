@@ -1,151 +1,90 @@
 name: browser.scroll
-version: 1.1.0
-when_to_use: 'Scroll the page or a container. A number, scroll_y, or y is an absolute page offset in CSS pixels, the same value browser.read reports as scroll_y. delta is {dx, dy} or a number of pixels down (dx 0). to is top or bottom. target scrolls that element into view, or scrolls that container when delta or to is set. target is placeholder, label, text, css, role and optional name, point {x, y, scroll_y}, or a string. Examples: 2200 and {"scroll_y":2200}.'
+version: 1.2.0
+when_to_use: 'Scroll the page or a container. dx and dy move the nearest scrollable ancestor at target. scroll_y or y is an absolute page offset. delta is {dx, dy} or a number down. to is top, bottom, left, or right. read gives viewport pixel coordinates for point targets. Example: {"dx":600,"target":{"x":756,"y":425}}.'
 inputs:
-  description: A number is an absolute page scroll_y. An object carries target, delta, to, scroll_y, or y.
   type: object
-  oneOf:
-    - type: number
-      description: Absolute page scroll_y in CSS pixels. Same meaning as browser.read viewport scroll_y.
-    - type: object
+  additionalProperties: false
+  description: dx and dy scroll a container. scroll_y or y scrolls the page to an absolute offset. A bare number is accepted by the server as scroll_y.
+  properties:
+    target:
+      type: object
       additionalProperties: false
+      description: One locator key or a point. Precedence is placeholder, label, role, text, css, then x and y. nth and exact refine a locator. read gives viewport pixel coordinates for x and y.
       properties:
-        target:
-          description: Element to scroll into view, or the container to scroll when delta or to is set. placeholder, label, text, css, role and name, a point, or a string.
-          oneOf:
-            - type: string
-              minLength: 1
-              description: Bare target. Resolved with get_by_placeholder, then get_by_label, then get_by_text, then as a CSS selector.
-            - type: object
-              additionalProperties: false
-              required:
-                - placeholder
-              properties:
-                placeholder:
-                  type: string
-                  minLength: 1
-                  description: Placeholder text for Playwright get_by_placeholder.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - label
-              properties:
-                label:
-                  type: string
-                  minLength: 1
-                  description: Label text for Playwright get_by_label.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - role
-              properties:
-                role:
-                  type: string
-                  minLength: 1
-                  description: ARIA role for Playwright get_by_role.
-                name:
-                  type: string
-                  minLength: 1
-                  description: Accessible name for get_by_role.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - text
-              properties:
-                text:
-                  type: string
-                  minLength: 1
-                  description: Text for Playwright get_by_text.
-                exact:
-                  type: boolean
-                  description: When true, get_by_text matches the whole string.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - css
-              properties:
-                css:
-                  type: string
-                  minLength: 1
-                  description: CSS selector for Playwright locator.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - x
-                - y
-              properties:
-                x:
-                  type: number
-                  description: Horizontal viewport CSS pixel.
-                y:
-                  type: number
-                  description: Vertical viewport CSS pixel.
-                scroll_y:
-                  type: integer
-                  minimum: 0
-                  description: Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y.
+        placeholder:
+          type: string
+          minLength: 1
+          description: Placeholder text for get_by_placeholder.
+        label:
+          type: string
+          minLength: 1
+          description: Label text for get_by_label.
+        role:
+          type: string
+          minLength: 1
+          description: ARIA role for get_by_role.
+        name:
+          type: string
+          minLength: 1
+          description: Accessible name for get_by_role.
+        text:
+          type: string
+          minLength: 1
+          description: Text for get_by_text.
+        exact:
+          type: boolean
+          description: When true, text matches the whole string.
+        css:
+          type: string
+          minLength: 1
+          description: CSS selector.
+        nth:
+          type: integer
+          minimum: 0
+          description: Zero-based match in the winning frame.
+        x:
+          type: number
+          description: Horizontal viewport CSS pixel from read.
+        y:
+          type: number
+          description: Vertical viewport CSS pixel from read.
         scroll_y:
           type: integer
           minimum: 0
-          description: Scroll the page to this absolute offset in CSS pixels.
-        y:
-          type: integer
-          minimum: 0
-          description: Same as scroll_y. Absolute page offset in CSS pixels.
-        delta:
-          description: Relative scroll. A number is dy with dx 0. An object is dx and dy in CSS pixels.
-          oneOf:
-            - type: number
-              description: Vertical delta in CSS pixels. dx is 0.
-            - type: object
-              additionalProperties: false
-              required:
-                - dx
-                - dy
-              properties:
-                dx:
-                  type: number
-                  description: Horizontal scroll delta in CSS pixels.
-                dy:
-                  type: number
-                  description: Vertical scroll delta in CSS pixels.
-        to:
-          type: string
-          enum:
-            - top
-            - bottom
-          description: Scroll to the top or the bottom of the page or target container.
-      anyOf:
-        - required:
-            - target
-        - required:
-            - delta
-        - required:
-            - to
-        - required:
-            - scroll_y
-        - required:
-            - y
+          description: Scroll the page to this offset before using x and y.
+    dx:
+      type: number
+      description: Horizontal delta in CSS pixels. Positive moves toward the right edge.
+    dy:
+      type: number
+      description: Vertical delta in CSS pixels. Positive moves down.
+    scroll_y:
+      type: integer
+      minimum: 0
+      description: Scroll the page to this absolute offset in CSS pixels.
+    y:
+      type: integer
+      minimum: 0
+      description: Same as scroll_y. Absolute page offset in CSS pixels. Not a point coordinate.
+    delta:
+      type: object
+      additionalProperties: false
+      description: Relative scroll in CSS pixels. The server also accepts a number as dy.
+      properties:
+        dx:
+          type: number
+          description: Horizontal scroll delta in CSS pixels.
+        dy:
+          type: number
+          description: Vertical scroll delta in CSS pixels.
+    to:
+      type: string
+      enum:
+        - top
+        - bottom
+        - left
+        - right
+      description: Scroll to an edge of the page or the target container.
 outputs:
   type: object
   additionalProperties: false
@@ -188,6 +127,51 @@ outputs:
       contentMediaType: image/png
       contentEncoding: base64
       description: PNG screenshot of the viewport after scrolling.
+    scrolled:
+      type: object
+      additionalProperties: false
+      description: What moved. moved is false when the call succeeded but nothing could scroll.
+      required:
+        - element
+        - frame
+        - scroll_left
+        - scroll_top
+        - moved
+        - max_scroll_left
+        - max_scroll_top
+      properties:
+        element:
+          type: string
+          description: Tag, id, and class summary of the scroller.
+        frame:
+          type: string
+          description: main, or the frame URL.
+        scroll_left:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: number
+          description: scrollLeft before and after.
+        scroll_top:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            type: number
+          description: scrollTop before and after.
+        moved:
+          type: boolean
+          description: True when scrollLeft or scrollTop changed.
+        max_scroll_left:
+          type: number
+          description: Maximum scrollLeft of the scroller.
+        max_scroll_top:
+          type: number
+          description: Maximum scrollTop of the scroller.
+        note:
+          type: string
+          description: Why nothing moved, when moved is false.
 side_effects: Scrolls the page or the target container in the remote browser.
 errors:
   - code: not_found

@@ -1,28 +1,35 @@
 # Checkpoint
 
 Objective:
-Brief 17: container scroll, flat schemas, frames, type feedback, useful errors. Two local commits. Do not push. Do not touch NABU or stop containers.
+Brief 17b: wheel scroll race. After mouse.wheel, wait until scrollLeft/scrollTop settle before measuring and before the scrollLeft fallback, so a late wheel does not double-scroll. One local commit on top of f85cc53 (do not amend). Do not push. Do not touch NABU or stop containers.
 
 Current state:
-- Tip is brief 16 commit 64214e7. Working tree was clean at start.
-- Reading the repro harness and interact/session/schema code before writing failing tests.
+- HEAD is f85cc53 "Add failing regressions for brief 17." Staged brief-17 fixes stay staged.
+- Settle wait is in _perform_scroll. Pre-fix race tests: dx landed at 1200, dy at 400, first dx=300 at 600. to:right already ended at max. After the wait, those four tests passed in 6.66s.
+- Next: full runtime pytest, repo pytest, and scripts/check.py, then one local commit.
 
 Decisions:
-- First commit is tests only and must fail on 64214e7. Second commit is the fix.
-- No lazy page auto-create. no_session gets a detail that says to call navigate.
-- Scroll and click published schemas become one flat object. Bare number and bare string stay server-side only.
-- Horizontal scroll walks scrollable ancestors and reports scrolled.moved plus a note when nothing moves.
-- Locators search every frame. Type reports the field value and waits for settle before the screenshot.
+- One commit for the staged brief-17 work plus this fix. Message: "Flatten browser inputs and report scroll, typing, and navigation failures."
+- Settle poll is ~30ms. Stop when two consecutive reads match and at least ~120ms have passed since the wheel, cap ~800ms. Same wait after the fallback.
+- Reported after is the settled position. scroll_y stays the scroller's scroll_top.
+- Horizontal proof is point dx=600 on #cell (600px wrapper, 1800px content): real scrollLeft stays 600 after 500ms and scrolled.scroll_left is [0, 600].
+- Vertical proof uses dy=200 on #vscroll (max is ~520, so a doubled 400 is still visible). to:right ends at max and reports max. Two dx=300 calls land at 300 then 600.
+- No lazy page auto-create. Published schemas stay one flat object.
 
 Files changed:
-- None yet.
+- runtimes/browser/tests/test_brief17.py (new race tests, on top of staged brief-17 tests)
+- runtimes/browser/agent_tools_browser/interact.py (_perform_scroll settle)
+- staged brief-17 files listed below stay in the same commit
 
 Commands that worked / failed:
-- None yet.
+- Pre-fix race tests: 3 failed, 1 passed in 4.47s. dx=600 settled at 1200, dy=200 at 400, first dx=300 at 600. to:right already ended at max.
+- Post-fix race tests: 4 passed in 6.66s.
+- Runtime pytest: 73 passed, 3 warnings, in 163.19s. EXIT 0.
+- Repo pytest: 70 passed in 16.90s. EXIT 0.
+- scripts/check.py: EXIT 0.
 
 Next action:
-Run the new brief 17 tests, record the failing names, and commit them as "Add failing regressions for brief 17". Then implement the fix.
-
+Create the one local commit (staged brief-17 work plus this settle fix). Do not amend f85cc53. Then write the commit hash here.
 Unresolved (non-blocking):
 - macstudio still on 2167ef1.
 - Live frontmost-Chrome pick still unverified on unlocked NABU.

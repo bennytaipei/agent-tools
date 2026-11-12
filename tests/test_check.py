@@ -121,11 +121,11 @@ def test_browser_manifests():
     assert manifests["screenshot.yaml"]["name"] == "browser.screenshot"
     assert manifests["handoff.yaml"]["name"] == "browser.handoff"
     assert manifests["read.yaml"]["version"] == "2.0.0"
-    assert manifests["navigate.yaml"]["version"] == "1.0.0"
+    assert manifests["navigate.yaml"]["version"] == "1.1.0"
     assert manifests["screenshot.yaml"]["version"] == "1.0.0"
-    assert manifests["handoff.yaml"]["version"] == "1.1.1"
+    assert manifests["handoff.yaml"]["version"] == "1.2.0"
     for name in ("click.yaml", "type.yaml", "scroll.yaml", "select.yaml", "wait_for.yaml"):
-        assert manifests[name]["version"] == "1.1.0"
+        assert manifests[name]["version"] == "1.2.0"
         assert manifests[name]["auth_needed"] == ["browser_session"]
         assert [item["code"] for item in manifests[name]["errors"]] == [
             "not_found",

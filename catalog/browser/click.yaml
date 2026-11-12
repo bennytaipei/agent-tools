@@ -1,146 +1,99 @@
 name: browser.click
-version: 1.1.0
-when_to_use: 'Click an element on the current page. target is placeholder, label, text, css, role and optional name, point {x, y, scroll_y}, or a string resolved as placeholder, then label, then text, then CSS. button is left, right, or middle. click_count is how many times to click. modifiers are Alt, Control, Meta, Shift, or ControlOrMeta. A string as the whole arguments value is the target. Examples: {"target":{"placeholder":"Search Admin Resources"}} and {"target":{"role":"button","name":"Sign in"}}.'
+version: 1.2.0
+when_to_use: 'Click an element on the current page. target uses placeholder, label,
+  text, css, role and name, or point x and y from read viewport pixels. button, click_count,
+  and modifiers are optional. Examples: {"target":{"placeholder":"Search Admin Resources"}}
+  and {"target":{"role":"button","name":"Sign in"}}.'
 inputs:
-  description: A string is a bare target. An object carries target plus optional button, click_count, and modifiers.
   type: object
-  oneOf:
-    - type: string
-      minLength: 1
-      description: Bare target. Resolved with get_by_placeholder, then get_by_label, then get_by_text, then as a CSS selector.
-    - type: object
+  additionalProperties: false
+  required:
+  - target
+  description: target is one locator or a point. The server also accepts a bare string
+    as the target.
+  properties:
+    target:
+      type: object
       additionalProperties: false
-      required:
-        - target
+      description: One locator key or a point. Precedence is placeholder, label, role,
+        text, css, then x and y. nth and exact refine a locator. read gives viewport
+        pixel coordinates for x and y.
       properties:
-        target:
-          description: Element to click. placeholder, label, text, css, role and name, a point, or a string.
-          oneOf:
-            - type: string
-              minLength: 1
-              description: Bare target. Resolved with get_by_placeholder, then get_by_label, then get_by_text, then as a CSS selector.
-            - type: object
-              additionalProperties: false
-              required:
-                - placeholder
-              properties:
-                placeholder:
-                  type: string
-                  minLength: 1
-                  description: Placeholder text for Playwright get_by_placeholder.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - label
-              properties:
-                label:
-                  type: string
-                  minLength: 1
-                  description: Label text for Playwright get_by_label.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - role
-              properties:
-                role:
-                  type: string
-                  minLength: 1
-                  description: ARIA role for Playwright get_by_role.
-                name:
-                  type: string
-                  minLength: 1
-                  description: Accessible name for get_by_role.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - text
-              properties:
-                text:
-                  type: string
-                  minLength: 1
-                  description: Text for Playwright get_by_text.
-                exact:
-                  type: boolean
-                  description: When true, get_by_text matches the whole string.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - css
-              properties:
-                css:
-                  type: string
-                  minLength: 1
-                  description: CSS selector for Playwright locator.
-                nth:
-                  type: integer
-                  minimum: 0
-                  description: Zero-based match when the locator matches more than one element.
-            - type: object
-              additionalProperties: false
-              required:
-                - x
-                - y
-              properties:
-                x:
-                  type: number
-                  description: Horizontal viewport CSS pixel.
-                y:
-                  type: number
-                  description: Vertical viewport CSS pixel.
-                scroll_y:
-                  type: integer
-                  minimum: 0
-                  description: Scroll the page to this offset before using x and y. Matches browser.read viewport scroll_y.
-        button:
+        placeholder:
           type: string
-          enum:
-            - left
-            - right
-            - middle
-          default: left
-          description: Mouse button.
-        click_count:
+          minLength: 1
+          description: Placeholder text for get_by_placeholder.
+        label:
+          type: string
+          minLength: 1
+          description: Label text for get_by_label.
+        role:
+          type: string
+          minLength: 1
+          description: ARIA role for get_by_role.
+        name:
+          type: string
+          minLength: 1
+          description: Accessible name for get_by_role.
+        text:
+          type: string
+          minLength: 1
+          description: Text for get_by_text.
+        exact:
+          type: boolean
+          description: When true, text matches the whole string.
+        css:
+          type: string
+          minLength: 1
+          description: CSS selector.
+        nth:
           type: integer
-          minimum: 1
-          maximum: 10
-          default: 1
-          description: Number of clicks.
-        modifiers:
-          type: array
-          description: Modifier keys held during the click.
-          items:
-            type: string
-            enum:
-              - Alt
-              - Control
-              - Meta
-              - Shift
-              - ControlOrMeta
+          minimum: 0
+          description: Zero-based match in the winning frame.
+        x:
+          type: number
+          description: Horizontal viewport CSS pixel from read.
+        y:
+          type: number
+          description: Vertical viewport CSS pixel from read.
+        scroll_y:
+          type: integer
+          minimum: 0
+          description: Scroll the page to this offset before using x and y.
+    button:
+      type: string
+      enum:
+      - left
+      - right
+      - middle
+      default: left
+      description: Mouse button.
+    click_count:
+      type: integer
+      minimum: 1
+      maximum: 10
+      default: 1
+      description: Number of clicks.
+    modifiers:
+      type: array
+      description: Modifier keys held during the click.
+      items:
+        type: string
+        enum:
+        - Alt
+        - Control
+        - Meta
+        - Shift
+        - ControlOrMeta
 outputs:
   type: object
   additionalProperties: false
   required:
-    - url
-    - title
-    - scroll_y
-    - viewport
-    - image
+  - url
+  - title
+  - scroll_y
+  - viewport
+  - image
   properties:
     url:
       type: string
@@ -158,8 +111,8 @@ outputs:
       additionalProperties: false
       description: Viewport size in CSS pixels.
       required:
-        - width
-        - height
+      - width
+      - height
       properties:
         width:
           type: integer
@@ -176,17 +129,17 @@ outputs:
       description: PNG screenshot of the viewport after the click.
 side_effects: Clicks the target in the remote browser.
 errors:
-  - code: not_found
-    when: The locator matched no element.
-  - code: ambiguous
-    when: The locator matched more than one element and nth was not set.
-  - code: not_interactable
-    when: The element is present and cannot be clicked.
-  - code: timeout
-    when: The click did not finish before its timeout.
-  - code: invalid_target
-    when: The target or the other inputs do not describe a click this tool can perform.
-  - code: no_session
-    when: The remote browser has no page.
+- code: not_found
+  when: The locator matched no element.
+- code: ambiguous
+  when: The locator matched more than one element and nth was not set.
+- code: not_interactable
+  when: The element is present and cannot be clicked.
+- code: timeout
+  when: The click did not finish before its timeout.
+- code: invalid_target
+  when: The target or the other inputs do not describe a click this tool can perform.
+- code: no_session
+  when: The remote browser has no page.
 auth_needed:
-  - browser_session
+- browser_session

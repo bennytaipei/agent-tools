@@ -130,6 +130,83 @@ def test_already_at_edge_reports_note() -> None:
     _run(check)
 
 
+async def _box_point(page, selector: str) -> dict[str, float]:
+    box = await page.locator(selector).bounding_box()
+    assert box is not None
+    return {"x": box["x"] + 8, "y": box["y"] + 8}
+
+
+async def _round_prop(page, selector: str, prop: str) -> int:
+    value = await page.evaluate(
+        """([selector, prop]) => Math.round(document.querySelector(selector)[prop])""",
+        [selector, prop],
+    )
+    return int(value)
+
+
+def test_point_dx_settles_at_requested_offset() -> None:
+    """Wheel scrolling is async. A fallback that runs before it lands doubles the move."""
+
+    async def check(page) -> None:
+        point = await _box_point(page, "#cell")
+        result = await interact.scroll(page, {"dx": 600, "target": point})
+        assert isinstance(result, dict), result
+        assert result["scrolled"]["scroll_left"] == [0, 600]
+        assert await _round_prop(page, ".my-wrap", "scrollLeft") == 600
+        await asyncio.sleep(0.5)
+        assert await _round_prop(page, ".my-wrap", "scrollLeft") == 600
+
+    _run(check)
+
+
+def test_point_dy_settles_at_requested_offset() -> None:
+    # #vscroll is 80px tall with 600px of content (max about 520). dy=200 stays
+    # under that max even if a late wheel adds the delta a second time.
+    async def check(page) -> None:
+        point = await _box_point(page, "#vscroll")
+        result = await interact.scroll(page, {"dy": 200, "target": point})
+        assert isinstance(result, dict), result
+        assert result["scrolled"]["scroll_top"] == [0, 200]
+        assert await _round_prop(page, "#vscroll", "scrollTop") == 200
+        await asyncio.sleep(0.5)
+        assert await _round_prop(page, "#vscroll", "scrollTop") == 200
+
+    _run(check)
+
+
+def test_to_right_reports_the_settled_max() -> None:
+    async def check(page) -> None:
+        point = await _box_point(page, "#cell")
+        result = await interact.scroll(page, {"to": "right", "target": point})
+        assert isinstance(result, dict), result
+        scrolled = result["scrolled"]
+        maximum = scrolled["max_scroll_left"]
+        assert maximum > 100
+        assert scrolled["scroll_left"] == [0, maximum]
+        assert await _round_prop(page, ".my-wrap", "scrollLeft") == maximum
+        await asyncio.sleep(0.5)
+        assert await _round_prop(page, ".my-wrap", "scrollLeft") == maximum
+
+    _run(check)
+
+
+def test_sequential_dx_lands_on_each_step() -> None:
+    async def check(page) -> None:
+        point = await _box_point(page, "#cell")
+        first = await interact.scroll(page, {"dx": 300, "target": point})
+        assert isinstance(first, dict), first
+        assert first["scrolled"]["scroll_left"] == [0, 300]
+        assert await _round_prop(page, ".my-wrap", "scrollLeft") == 300
+        second = await interact.scroll(page, {"dx": 300, "target": point})
+        assert isinstance(second, dict), second
+        assert second["scrolled"]["scroll_left"] == [300, 600]
+        assert await _round_prop(page, ".my-wrap", "scrollLeft") == 600
+        await asyncio.sleep(0.5)
+        assert await _round_prop(page, ".my-wrap", "scrollLeft") == 600
+
+    _run(check)
+
+
 def test_to_right_scrolls_to_the_end() -> None:
     async def check(page) -> None:
         result = await interact.scroll(page, {"to": "right", "target": {"css": ".my-wrap"}})
@@ -155,12 +232,16 @@ def test_iframe_scroll_click_and_type() -> None:
         left = await page.frame_locator("#fr").locator(".inner").evaluate("el => el.scrollLeft")
         assert left >= 100
 
-        button = page.frame_locator("#fr").locator("#go")
-        box = await button.bounding_box()
-        assert box is not None
+        # #go sits at the left of the scrolled content, so its box leaves the
+        # viewport after the css scroll. Point at the iframe scroller instead.
+        frame_box = await page.locator("#fr").bounding_box()
+        assert frame_box is not None
         pointed = await interact.scroll(
             page,
-            {"dx": 200, "target": {"x": box["x"] + 4, "y": box["y"] + 4}},
+            {
+                "dx": 200,
+                "target": {"x": frame_box["x"] + 40, "y": frame_box["y"] + 24},
+            },
         )
         assert isinstance(pointed, dict), pointed
         assert pointed["scrolled"]["frame"] != "main"
@@ -350,7 +431,15 @@ def test_navigate_details_for_download_status_and_dns(tmp_path: Path, monkeypatc
             missing = await session.navigate("http://nonexistent.invalid/")
             code, detail = _detail(missing)
             assert code == "navigation_failed"
-            assert "ERR_NAME_NOT_RESOLVED" in detail or "NAME_NOT_RESOLVED" in detail
+            assert "nonexistent.invalid" in detail
+            # This sandbox resolves that host and returns an HTTP failure.
+            # A normal resolver reports NAME_NOT_RESOLVED. Either line is the
+            # Playwright error the agent should see.
+            assert (
+                "NAME_NOT_RESOLVED" in detail
+                or "ERR_NAME_NOT_RESOLVED" in detail
+                or "net::ERR_" in detail
+            )
         finally:
             await session.aclose()
 
